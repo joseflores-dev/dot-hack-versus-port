@@ -221,8 +221,8 @@ if(MINGW)
     find_package(SDL2 REQUIRED)
     # virtdisk: the ISO mounted by Windows; comdlg32: the file dialog that picks it; shell32: CommandLineToArgvW.
     target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2 virtdisk comdlg32 shell32)
-    # No libc++/libunwind DLLs to ship beside the .exe; a GUI program (no console window), logging to data\log.txt.
-    target_link_options(${PROJECT_NAME} PRIVATE -static-libgcc -static-libstdc++ -Wl,--stack,8388608 -mwindows)
+    # Fully static (libc++, libunwind, winpthread: no mingw DLLs to ship beside the .exe); a GUI program (no console window), logging to data\log.txt.
+    target_link_options(${PROJECT_NAME} PRIVATE -static -Wl,--stack,8388608 -mwindows)
 endif()
 
 # The lifted SPU sources use bare #include "spu_context.h". Scope that include
