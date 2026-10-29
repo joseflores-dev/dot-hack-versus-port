@@ -42,7 +42,10 @@ javac -encoding UTF-8 -nowarn -source 8 -target 8 -bootclasspath "$BCP" -d "$B/c
 
 # 3. resources + manifest
 "$BT/aapt2.exe" compile --dir apk/res -o "$B/res/res.zip"
-"$BT/aapt2.exe" link -I "$AJ" --manifest apk/AndroidManifest.xml -o "$B/base.apk" "$B/res/res.zip"
+# The decrypted EBOOT ships as an asset: the app unpacks it once into its files dir (main.cpp), so the player
+# only has to provide the disc image.
+mkdir -p "$B/assets" && cp game/EBOOT.ELF "$B/assets/EBOOT.ELF"
+"$BT/aapt2.exe" link -I "$AJ" --manifest apk/AndroidManifest.xml -A "$B/assets" -o "$B/base.apk" "$B/res/res.zip"
 
 # 4. dex + libs into the APK, align, sign
 python -I - "$B" <<'EOF'

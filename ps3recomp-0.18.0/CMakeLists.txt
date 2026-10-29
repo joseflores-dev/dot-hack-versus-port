@@ -331,6 +331,11 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
         # Android arm64 phones are ARMv8.2 or later: LSE atomics inline instead
         # of the outline __aarch64_* helpers (a call and a flag test per atomic).
         $<$<BOOL:${ANDROID}>:-march=armv8.2-a>
+        # The Android port serves the disc image from under the host file API by
+        # wrapping fopen/open/stat/... at link time (hackversus/isofs.c); the NDK's
+        # _FORTIFY_SOURCE=2 would turn those calls into __open_2 / __read_chk and
+        # slip past the wrappers.
+        $<$<BOOL:${ANDROID}>:-U_FORTIFY_SOURCE>
     )
     # SSE4.1 (any x86-64 since ~2008): pshufb/blendv for spu_shufb, the
     # hottest SPU op in lifted audio code. Probed rather than assumed: recent

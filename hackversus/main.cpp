@@ -53,6 +53,7 @@
 #include <sys/mman.h>   /* mmap: the guest arena, see alloc_guest_vm */
 #include <sys/stat.h>   /* mkdir: the shader cache dir */
 #include <unistd.h>     /* unlink: HV_LOG=0 removes the log */
+#include <fcntl.h>      /* open: --iso-path */
 #endif
 
 #if defined(__APPLE__)
@@ -105,6 +106,7 @@ extern int32_t g_sys_process_exit_code;
 uint8_t* vm_base = nullptr;
 extern uint32_t ppu_vm_size;                  /* ppu_loader.cpp: the OOB guard */
 extern "C" void ppu_mm_publish(void);       /* ppu_loader.cpp: the lifted code's PPU_MM_SNAP copy */
+extern "C" int  hv_isofs_mount(int fd, const char* prefix);   /* isofs.c: the disc image behind the host file API */
 
 /* Guest-callback dispatch. g_ps3_guest_caller is the hook the HLE runtime
  * calls back into recompiled code through -- cellSysutil events and the GCM
@@ -455,7 +457,7 @@ static int run_guest(uint32_t entry, uint32_t stack_top) { return ppu_run(entry,
  * files dir. The app opens straight into the game, so the runner's settings that the adb runs pass as
  * environment variables become defaults here. */
 extern "C" void hv_vpad_init(void);
-static std::string s_apk_eboot, s_apk_vfs;
+static std::string s_apk_eboot, s_apk_vfs, s_apk_iso_root;
 static void apk_prepare(int* argc, char*** argv)
 {
     const char* files = SDL_AndroidGetExternalStoragePath();
@@ -467,6 +469,32 @@ static void apk_prepare(int* argc, char*** argv)
     if (!data && files) {
         const std::string own = std::string(files) + "/PS3";
         if (FILE* f = fopen((own + "/EBOOT.ELF").c_str(), "rb")) { fclose(f); dir = own; }
+    }
+    /* The disc as an ISO (SetupActivity -> HackVersusActivity.getArguments): --iso-fd <fd> is the descriptor
+     * Android's document picker gave for the user's image (no storage permission involved), --iso-path <file>
+     * an image on the shared storage. Mounted under <files>/iso and served by isofs.c; the writable data
+     * (saves, hv_env.txt, the extracted EBOOT) then lives in the app's own folder. */
+    {
+        int iso_fd = -1; const char* iso_path = NULL;
+        for (int i = 1; i + 1 < *argc; i++) {
+            if (strcmp((*argv)[i], "--iso-fd") == 0) iso_fd = atoi((*argv)[i + 1]);
+            if (strcmp((*argv)[i], "--iso-path") == 0) iso_path = (*argv)[i + 1];
+        }
+        if (iso_fd < 0 && iso_path) { iso_fd = open(iso_path, O_RDONLY); if (iso_fd < 0) fprintf(stderr, "[apk] cannot open %s\n", iso_path); }
+        if (iso_fd >= 0 && files) {
+            const std::string prefix = std::string(files) + "/iso";
+            if (hv_isofs_mount(iso_fd, prefix.c_str()) == 0) {
+                s_apk_iso_root = prefix;
+                dir = std::string(files) + "/PS3";
+                mkdir(dir.c_str(), 0775);
+                /* /dev_hdd0 (the title installs ~2 GB of DATA.CPK there on first run, and keeps its saves)
+                 * would otherwise land under the read-only disc as <vfs>/game: point it at the app folder. */
+                const std::string hdd0 = dir + "/dev_hdd0";
+                mkdir(hdd0.c_str(), 0775);
+                mkdir((hdd0 + "/game").c_str(), 0775);
+                setenv("PS3_HDD0_ROOT", hdd0.c_str(), 0);
+            }
+        }
     }
     /* Both streams append to one file: a "w" stdout writes at its own offset and overwrites what stderr adds. */
     if (FILE* f = fopen(log.c_str(), "w")) fclose(f);
@@ -500,8 +528,25 @@ static void apk_prepare(int* argc, char*** argv)
         freopen("/dev/null", "w", stderr);
         unlink(log.c_str());
     }
+    /* The decrypted EBOOT: the user's own copy beside the data if there is one, else the one that ships as an
+     * asset of the APK, unpacked once into the app's files dir (SDL reads relative paths from the assets). */
     s_apk_eboot = dir + "/EBOOT.ELF";
-    s_apk_vfs   = dir + "/vfs";
+    if (FILE* f = fopen(s_apk_eboot.c_str(), "rb")) fclose(f);
+    else if (files) {
+        const std::string unpacked = std::string(files) + "/EBOOT.ELF";
+        if (FILE* f = fopen(unpacked.c_str(), "rb")) fclose(f);
+        else if (SDL_RWops* rw = SDL_RWFromFile("EBOOT.ELF", "rb")) {
+            FILE* out = fopen((unpacked + ".part").c_str(), "wb");
+            static char buf[1 << 16]; size_t n; size_t total = 0;
+            while (out && (n = SDL_RWread(rw, buf, 1, sizeof buf)) > 0) total += fwrite(buf, 1, n, out);
+            if (out) fclose(out);
+            SDL_RWclose(rw);
+            if (total) rename((unpacked + ".part").c_str(), unpacked.c_str());
+            printf("[apk] EBOOT.ELF unpacked from the APK (%zu bytes)\n", total);
+        }
+        s_apk_eboot = unpacked;
+    }
+    s_apk_vfs   = s_apk_iso_root.empty() ? dir + "/vfs" : s_apk_iso_root;
     setenv("PS3_VFS_ROOT", s_apk_vfs.c_str(), 0);
     /* Save data: cellSaveData writes under $PS3_GAMEDATA_ROOT/dev_hdd0/home/00000001/savedata/<dir>; without it the
      * path was the cwd-relative ./gamedata, unwritable from the app, and every save failed (-2147306494). */

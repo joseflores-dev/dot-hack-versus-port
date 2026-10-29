@@ -179,6 +179,7 @@ if(HV_APK)
     add_library(${PROJECT_NAME} SHARED
         main.cpp
         stubs.cpp
+        isofs.c
         ${PS3RECOMP_SCAFFOLD}
         ${HLE_NID_TABLE}
         ${RECOMP_SOURCES}
@@ -194,6 +195,16 @@ if(HV_APK)
     # GOT. Binding the library's own symbols locally lets the linker call
     # directly and relax the GOT loads; SDL_main and the JNI entry stay exported.
     target_link_options(${PROJECT_NAME} PRIVATE -Wl,-Bsymbolic)
+    # isofs.c: the disc image served from under the host file API. Every call to these from the runtime and
+    # the port is routed through __wrap_<name>, which answers for paths under the ISO mount and hands the rest
+    # to the real libc function. The runtime is built without _FORTIFY_SOURCE so the calls keep these names
+    # (fortified builds call __open_2, __read_chk, ...).
+    target_link_options(${PROJECT_NAME} PRIVATE
+        -Wl,--wrap=fopen,--wrap=fopen64,--wrap=open,--wrap=open64,--wrap=openat,--wrap=fdopen,--wrap=fileno
+        -Wl,--wrap=fstat,--wrap=fstat64,--wrap=stat,--wrap=stat64,--wrap=lstat,--wrap=access,--wrap=close
+        -Wl,--wrap=read,--wrap=pread,--wrap=pread64,--wrap=lseek,--wrap=lseek64
+        -Wl,--wrap=opendir,--wrap=readdir,--wrap=readdir64,--wrap=closedir,--wrap=rewinddir)
+    target_compile_options(${PROJECT_NAME} PRIVATE -U_FORTIFY_SOURCE)
 else()
 add_executable(${PROJECT_NAME}
     main.cpp
