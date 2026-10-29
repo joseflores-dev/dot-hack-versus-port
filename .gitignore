@@ -1,0 +1,34 @@
+# Lista blanca: solo entra lo que se nombra abajo con "!".
+# Fuera quedan el juego (ISO, EBOOT, datos extraídos), el código traducido del juego (recomp/, spu_jobs/),
+# los toolchains portátiles, los directorios de build, logs, capturas de trabajo y las notas internas.
+*
+!.gitignore
+!README.md
+!LICENSE
+!iso_list.txt
+
+# Fuentes del port
+!hackversus/
+!hackversus/**
+!apk/
+!apk/**
+apk/debug.keystore
+!tools/
+!tools/**
+!docs/
+!docs/**
+
+# Toolkit ps3recomp (MIT) con las modificaciones de este port
+!ps3recomp-0.18.0/
+!ps3recomp-0.18.0/**
+ps3recomp-0.18.0/**/__pycache__/
+ps3recomp-0.18.0/**/*.pyc
+
+# Nunca
+NOTAS-DESARROLLO.md
+*.iso
+*.PUP
+*.apk
+*.log
+__pycache__/
+ps3recomp-0.18.0/.github/

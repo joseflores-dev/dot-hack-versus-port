@@ -1,0 +1,609 @@
+/*
+ * ps3recomp game project -- entry point template.
+ *
+ * This is the runner. It boots a lifted title through the toolkit's PPU
+ * scaffold: allocate the flat guest VM, load the PPU ELF named on the command
+ * line, register the lifted function table and the HLE NID handlers, start a
+ * frame clock, and dispatch the entry OPD.
+ *
+ * The scaffold does the work; nothing below reimplements it. ppu_load_elf,
+ * ppu_recomp_register, ppu_hle_init, ppu_sysprx_register, ppu_fs_register,
+ * lv2_init_syscalls and ppu_run all come from the toolkit, compiled into this
+ * project from PS3RECOMP_DIR (see CMakeLists.txt). What is left here is the
+ * part a port owns: which backend to present through, how the frame clock is
+ * paced, and whatever diagnostics the title turns out to need.
+ *
+ * runtime/ppu/tests/boot_main.cpp in the toolkit is the same boot in its
+ * fully-instrumented form -- crash filter, hang watchdog, guest-PC sampling
+ * profiler. Read it when a boot goes wrong; copy from it what the title
+ * needs. It is deliberately not what a fresh project starts with.
+ *
+ * The one part that IS duplicated from it is the frame clock below, because a
+ * port is expected to change its pacing and a shared one would be the wrong
+ * shape for that. It was copied faithfully, comments and all. If a pacing bug
+ * is fixed in one of the two, look at the other.
+ *
+ * This builds on Windows, macOS and Linux. CI builds and runs it against the
+ * boot smoke title on the last two, and compile-checks it against clang-cl on
+ * the first (tools/check_ppu_scaffold.py).
+ */
+
+/* The lifter's generated header, which declares ppu_context and the function
+ * table. It comes first: everything below is written against that struct. */
+#include "ppu_recomp.h"
+
+/* The Win32 names -- Sleep, GetTickCount64, CreateThread, InterlockedIncrement,
+ * VirtualAlloc, the scalar typedefs -- from one place. On Windows this is a
+ * passthrough to <windows.h>; off Windows the toolkit's shim supplies the same
+ * names over pthreads and mmap, so the call sites below are written once. */
+#include "win32_compat.h"
+
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <string>
+#ifdef HV_APK
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_main.h>   /* on Android this renames main() to the extern "C" SDL_main SDLActivity calls */
+#include <SDL2/SDL_system.h> /* SDL_AndroidGetExternalStoragePath */
+#endif
+
+#ifndef _WIN32
+#include <sys/mman.h>   /* mmap: the guest arena, see alloc_guest_vm */
+#include <sys/stat.h>   /* mkdir: the shader cache dir */
+#endif
+
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>   /* the main thread's run loop, see run_guest */
+#include <pthread.h>
+#endif
+
+#ifdef _WIN32
+/* timeBeginPeriod: <windows.h> arrives with WIN32_LEAN_AND_MEAN set, which
+ * excludes the multimedia timer API, so it is asked for by name -- and after
+ * windows.h, since timeapi.h uses UINT. No shim exists off Windows because
+ * there is nothing to shim: the 15.6 ms default timer granularity this works
+ * around is a Windows problem. */
+#include <timeapi.h>
+#endif
+
+/* ---------------------------------------------------------------------------
+ * What the scaffold gives this file
+ * -----------------------------------------------------------------------*/
+extern "C" {
+uint32_t ppu_load_elf(const char* path);      /* ELF -> guest RAM, returns entry OPD */
+void     ppu_recomp_register(void);           /* generated: lifted table -> address map */
+void     ppu_hle_init(void);                  /* firmware import NID -> HLE handler */
+void     ppu_sysprx_register(void);           /* boot-critical CRT (sys_initialize_tls, ...) */
+void     ppu_fs_register(void);               /* cellFs over the real game directory */
+void     lv2_init_syscalls(void);             /* the lv2 syscall table */
+int      ppu_run(uint32_t entry_opd, uint32_t stack_top);
+
+/* This project's own: load whatever real system PRX modules the title needs
+ * into guest RAM and register their exports. stubs.cpp has the empty version
+ * a game with no lifted PRX wants. */
+void     ps3_load_prx_modules(void);
+
+extern const char* ppu_vfs_root;              /* host dir the PS3 mount points map into */
+void     ps3_host_quit(const char* why);      /* cellSysutil.c: REQUEST_EXITGAME, then exit 0 */
+void     cellGame_init_from_paramsfo(const char* sfo_path);  /* cellGame.c: title id/category from the disc */
+
+/* sys_ppu_thread.c: the main thread's stack, as sys_ppu_thread_get_stack_information
+ * reports it. Left at 0 it names VM_STACK_BASE, the first created thread's stack. */
+extern uint32_t g_ppu_main_stack_addr;
+extern uint32_t g_ppu_main_stack_size;
+
+/* The status the guest handed to sys_process_exit. A title that exits that way
+ * never returns through ppu_run, so this is only read on the path where the
+ * entry function unwound instead. */
+extern int     g_sys_process_exit_called;
+extern int32_t g_sys_process_exit_code;
+
+/* Host-provided symbols the runtime and the HLE libraries link against. */
+uint8_t* vm_base = nullptr;
+extern uint32_t ppu_vm_size;                  /* ppu_loader.cpp: the OOB guard */
+extern "C" void ppu_mm_publish(void);       /* ppu_loader.cpp: the lifted code's PPU_MM_SNAP copy */
+
+/* Guest-callback dispatch. g_ps3_guest_caller is the hook the HLE runtime
+ * calls back into recompiled code through -- cellSysutil events and the GCM
+ * vblank/flip handlers. ppu_guest_call does the OPD -> dispatch. */
+typedef void (*ps3_guest_caller_fn)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                                    uint64_t, uint64_t, uint64_t, uint64_t);
+extern ps3_guest_caller_fn g_ps3_guest_caller;
+uint64_t ppu_guest_call(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                        uint64_t, uint64_t, uint64_t, uint64_t);
+
+/* The GCM half of the frame clock. */
+void     cellGcmTickVBlank(void);
+void     cellGcmTickFlip(void);
+int      cellGcm_take_flip_pending(void);
+void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
+unsigned cellGcm_flip_request_count(void);
+void     cellGcm_fifo_kick_wait(unsigned ms); /* sleep up to ms, waking at once on a FIFO kick */
+}
+
+/* ---------------------------------------------------------------------------
+ * RSX present backend
+ * -----------------------------------------------------------------------*/
+/* D3D12 on Windows, Metal on Apple, and the null backend's headless software
+ * path anywhere else -- the same selection runtime/host/host_posix.c and the
+ * toolkit's boot harness make. All three expose the same three entry points,
+ * so the frame clock below is backend-agnostic. */
+#if defined(_WIN32)
+extern "C" int  rsx_d3d12_backend_init(uint32_t w, uint32_t h, const char* title);
+extern "C" void rsx_d3d12_backend_present(void);
+extern "C" int  rsx_d3d12_backend_pump_messages(void);
+#  define rsx_backend_init    rsx_d3d12_backend_init
+#  define rsx_backend_present rsx_d3d12_backend_present
+#  define rsx_backend_pump    rsx_d3d12_backend_pump_messages
+#  define RSX_BACKEND_NAME    "D3D12"
+#elif defined(__APPLE__)
+extern "C" int  rsx_metal_backend_init(uint32_t w, uint32_t h, const char* title);
+extern "C" void rsx_metal_backend_present(void);
+extern "C" int  rsx_metal_backend_pump_messages(void);
+#  define rsx_backend_init    rsx_metal_backend_init
+#  define rsx_backend_present rsx_metal_backend_present
+#  define rsx_backend_pump    rsx_metal_backend_pump_messages
+#  define RSX_BACKEND_NAME    "Metal"
+#else
+extern "C" int  rsx_null_backend_init(uint32_t w, uint32_t h, const char* title);
+extern "C" void rsx_null_backend_present(void);
+extern "C" int  rsx_null_backend_pump_messages(void);
+extern "C" int  rsx_vulkan_backend_init(uint32_t w, uint32_t h, const char* title);
+extern "C" void rsx_vulkan_backend_present(void);
+extern "C" int  rsx_vulkan_backend_pump_messages(void);
+/* Vulkan when HV_VULKAN is set (the Android build has a GPU; ps3recomp's Linux default is the headless null
+ * backend), falling back to null if the device cannot be brought up. */
+static int s_use_vulkan = -1;
+static int use_vulkan(void) { if (s_use_vulkan < 0) s_use_vulkan = getenv("HV_VULKAN") ? 1 : 0; return s_use_vulkan; }
+static int rsx_backend_init(uint32_t w, uint32_t h, const char* title)
+{
+    if (use_vulkan()) {
+        if (rsx_vulkan_backend_init(w, h, title) == 0) return 0;
+        printf("[boot] Vulkan backend failed to start; falling back to null\n");
+        s_use_vulkan = 0;
+    }
+    return rsx_null_backend_init(w, h, title);
+}
+static void rsx_backend_present(void) { use_vulkan() ? rsx_vulkan_backend_present() : rsx_null_backend_present(); }
+static int  rsx_backend_pump(void)    { return use_vulkan() ? rsx_vulkan_backend_pump_messages() : rsx_null_backend_pump_messages(); }
+#  define RSX_BACKEND_NAME    (use_vulkan() ? "Vulkan" : "null (headless software)")
+#endif
+
+/* ---------------------------------------------------------------------------
+ * Configuration
+ * -----------------------------------------------------------------------*/
+/* The flat VM must span every region the PS3 memory map uses, not just the
+ * game image: sys_ppu_thread_create puts thread stacks at 0xD0000000, so a
+ * smaller arena makes every spawned thread's stack access out of bounds. */
+#define VM_SIZE       0x100010000ull   /* the full 32-bit guest space + a 64K guard */
+#define STACK_TOP     0x0FF00000u      /* main-thread stack, below the 0x10000000 segment */
+#define STACK_SIZE    0x00100000u      /* what the main thread is told it has */
+#define WINDOW_WIDTH  1280
+#define WINDOW_HEIGHT 720
+
+/* ---------------------------------------------------------------------------
+ * Frame clock
+ * -----------------------------------------------------------------------*/
+/* On real hardware the RSX raises a vblank interrupt about 60 times a second
+ * and that is what drives the game's frame loop. With no RSX it is synthesized
+ * here: a host thread calls cellGcmTickVBlank/TickFlip, which invoke the
+ * handlers the guest registered, and drains the GCM FIFO. Without this the
+ * title initialises, registers its handlers and then waits forever.
+ *
+ * The ticks are driven off real elapsed time rather than off how long present()
+ * took. A hidden or occluded window makes present block hard, and pacing the
+ * ticks behind it paces the whole game behind it. */
+static volatile LONG g_frames_presented = 0;
+
+/* Frames handed to the backend at a guest FLIP boundary -- one per frame the
+ * guest actually finished. The presents made before the guest's first flip, so
+ * a fresh window is not left blank through a long boot, carry no guest frame
+ * and are deliberately not counted. */
+extern "C" unsigned ppu_boot_frames_presented(void)
+{
+    return (unsigned)g_frames_presented;
+}
+
+static void present_guest_frame(void)
+{
+    rsx_backend_present();
+    /* This thread increments and guest threads read, so interlocked rather
+     * than a volatile ++, which on arm64 is neither atomic nor a fence. */
+    InterlockedIncrement(&g_frames_presented);
+}
+
+/* HV_BIG_CORES=<mask> (Android; default 0xF0 = cpu4-7 on the S22, the big
+ * and prime cores): the two threads on a fight frame's critical path -- the
+ * title's main thread and the FIFO walker -- stay on the big cores. Left to
+ * the scheduler they landed on the little ones (cpu0-3, 1.1 GHz under the
+ * battery saver) beside the SPU workers. 0 leaves everything to the scheduler. */
+#if defined(__ANDROID__)
+#include <sched.h>
+static void hv_pin_big(const char* who)
+{
+    static long mask = -1;
+    if (mask < 0) { const char* e = getenv("HV_BIG_CORES"); mask = e ? strtol(e, NULL, 0) : 0xF0; }
+    /* HV_MAIN_CORES=<mask>: the title's main thread alone (default: the same). */
+    if (who[0] == 'g') { const char* e = getenv("HV_MAIN_CORES"); if (e) mask = strtol(e, NULL, 0); }
+    if (mask <= 0) return;
+    cpu_set_t set; CPU_ZERO(&set);
+    for (int c = 0; c < 32; c++) if (mask >> c & 1) CPU_SET(c, &set);
+    if (sched_setaffinity(0, sizeof set, &set) == 0) printf("[apk] %s pinned to cores 0x%lx\n", who, mask);
+    else printf("[apk] %s: sched_setaffinity failed\n", who);
+}
+#else
+static void hv_pin_big(const char* who) { (void)who; }
+#endif
+
+static DWORD WINAPI frame_clock(LPVOID)
+{
+    hv_pin_big("fifo walker");
+    const char* title = getenv("PS3_TITLE");
+    if (!title || !*title) title = "ps3recomp";
+
+    int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
+    fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
+            rsx_ok ? "OK -- window open" : "FAILED");
+
+    unsigned  last_flip = 0;
+    ULONGLONG next_tick = GetTickCount64();
+
+    for (;;) {
+        /* Not a flat Sleep(4): a guest thread that polls an RSX label kicks the FIFO (sys_timer_usleep does), and
+         * each poll paying a whole 4 ms before the drain wrote its label held .hack//Versus near 1 fps. */
+        cellGcm_fifo_kick_wait(4);
+        ULONGLONG now = GetTickCount64();
+
+        int fired = 0;
+        while ((long long)(now - next_tick) >= 0 && fired < 240) {
+            cellGcmTickVBlank();
+            cellGcmTickFlip();
+            /* Present a pending flip BEFORE draining any further. The flip
+             * fires at a get==put frame boundary on the guest thread, so the
+             * batch held right now is exactly the completed frame; presenting
+             * after the drain races the guest's next-frame writes and shows a
+             * mixed one. */
+            if (rsx_ok && cellGcm_take_flip_pending()) {
+                present_guest_frame();
+                last_flip = cellGcm_flip_request_count();
+            }
+            /* Drain the FIFO every tick. This is what writes the RSX sync-fence
+             * labels the game's per-frame logic blocks on, so it has to keep
+             * advancing at 60 Hz even while present() throttles. */
+            if (rsx_ok) cellGcm_rsx_process_fifo();
+            next_tick += 16;             /* ~60 Hz */
+            fired++;
+        }
+        if (fired >= 240) next_tick = now;   /* fell too far behind -- resync */
+
+        /* Drain at the outer cadence too, not only on the 16 ms tick: titles
+         * fence every render pass on a label the drain writes, and one wave of
+         * those at 16 ms apiece paces the guest into single-figure frame rates.
+         * The real RSX writes them in microseconds. */
+        if (rsx_ok) {
+            if (cellGcm_take_flip_pending()) {
+                present_guest_frame();
+                last_flip = cellGcm_flip_request_count();
+            }
+            cellGcm_rsx_process_fifo();
+
+            if (rsx_backend_pump() != 0) {
+                rsx_ok = 0;              /* window closed */
+                /* ...so quit, as the console's Quit Game does, instead of
+                 * leaving the game running with no window. */
+                ps3_host_quit("window closed");
+                continue;
+            }
+            /* Present on a guest flip. A present on a fixed clock can catch the
+             * drain mid-frame and flash a partial one. Before the first flip
+             * present freely, so the window is not blank during boot. */
+            unsigned fc = cellGcm_flip_request_count();
+            if (fc != last_flip) {
+                present_guest_frame();
+                last_flip = fc;
+            } else if (fc == 0) {
+                rsx_backend_present();
+            }
+        }
+    }
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * VFS root
+ * -----------------------------------------------------------------------*/
+/* Derive the directory holding PS3_GAME from the EBOOT path
+ * <root>/PS3_GAME/USRDIR/EBOOT.elf -> <root>. $PS3_VFS_ROOT overrides. */
+static char s_vfs_root[1024];
+
+static void derive_vfs_root(const char* eboot)
+{
+    const char* env = getenv("PS3_VFS_ROOT");
+    if (env && *env) { ppu_vfs_root = env; return; }
+
+    strncpy(s_vfs_root, eboot, sizeof s_vfs_root - 1);
+    for (char* p = s_vfs_root; *p; p++) if (*p == '\\') *p = '/';
+    /* strip EBOOT.elf, USRDIR and PS3_GAME */
+    for (int i = 0; i < 3; i++) { char* s = strrchr(s_vfs_root, '/'); if (s) *s = 0; }
+    if (!s_vfs_root[0]) strcpy(s_vfs_root, ".");
+    ppu_vfs_root = s_vfs_root;
+}
+
+/* ---------------------------------------------------------------------------
+ * Guest VM
+ * -----------------------------------------------------------------------*/
+#ifdef _WIN32
+/* Demand-paging for the flat VM: reserve the whole 4 GB guest space, which
+ * costs no commit, and commit each 64 KB page on first access. Every 32-bit
+ * guest offset is then valid, so a garbage guest pointer reads zero instead of
+ * killing the process. Faults outside the arena fall through untouched. */
+static LONG WINAPI vm_commit_veh(EXCEPTION_POINTERS* ep)
+{
+    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+        ULONG_PTR fault = ep->ExceptionRecord->ExceptionInformation[1];
+        uintptr_t base  = (uintptr_t)vm_base;
+        if (vm_base && fault >= base && fault < base + VM_SIZE) {
+            void* page = (void*)(fault & ~(uintptr_t)0xFFFF);
+            if (VirtualAlloc(page, 0x10000, MEM_COMMIT, PAGE_READWRITE))
+                return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
+static bool alloc_guest_vm(void)
+{
+#ifdef _WIN32
+    AddVectoredExceptionHandler(1, vm_commit_veh);
+    vm_base = (uint8_t*)VirtualAlloc(NULL, VM_SIZE, MEM_RESERVE, PAGE_READWRITE);
+    ppu_vm_size = 0;              /* the whole space is backed; no OOB guard needed */
+#else
+    /* No vectored exception handlers off Windows, so the arena is mapped up
+     * front and lazily backed by the OS: only pages the title touches cost
+     * anything. It spans the whole 32-bit space plus the guard, as on Windows.
+     * It used to stop below 0xE0000000, but the raw SPU windows (local store
+     * and problem-state registers, runtime/spu/spu_raw.c) live from there up.
+     * Every load and store a title made into one was reported as an
+     * out-of-bounds access and dropped, so a raw SPU was never loaded or
+     * started, and sys_raw_spu_create, which clears the registers through
+     * vm_base directly, wrote past the end of the mapping. With the whole
+     * space backed, ppu_vm_size 0 also gives the loader's bounds check the
+     * one-compare fast path Windows already has.
+     *
+     * mmap, not calloc: vm_commit() hands vm_base + addr to mprotect, which
+     * takes page-aligned addresses only. glibc serves an allocation this big
+     * from its own mmap chunk and returns a pointer 16 bytes past the page
+     * start, so every commit failed with EINVAL and sys_memory_allocate
+     * answered ENOMEM to every call. mmap's base is page-aligned and zeroed. */
+    void* p = mmap(NULL, VM_SIZE, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    vm_base = (p == MAP_FAILED) ? nullptr : (uint8_t*)p;
+    ppu_vm_size = 0;              /* the whole space is backed; no OOB guard needed */
+#endif
+    /* Fase 19: the lifted functions' PPU_MM_SNAP copy, computed once now that
+     * vm_base and ppu_vm_size are final (ppu_recomp.h / ppu_loader.cpp). */
+    if (vm_base) ppu_mm_publish();
+    return vm_base != nullptr;
+}
+
+/* ---------------------------------------------------------------------------
+ * Main
+ * -----------------------------------------------------------------------*/
+static void harness_guest_caller(uint32_t opd, uint64_t a0, uint64_t a1,
+                                 uint64_t a2, uint64_t a3, uint64_t a4,
+                                 uint64_t a5, uint64_t a6, uint64_t a7)
+{
+    ppu_guest_call(opd, a0, a1, a2, a3, a4, a5, a6, a7);
+}
+
+/* ---------------------------------------------------------------------------
+ * Running the guest
+ * -----------------------------------------------------------------------*/
+#if defined(__APPLE__)
+/* AppKit only runs on the process's main thread. The Metal backend creates
+ * its window and pumps its events with dispatch_sync onto the main queue
+ * when it is called from any other thread, as it is from the frame clock.
+ * With the guest on the main thread nothing ever serviced that queue: the
+ * frame clock blocked in its first rsx_backend_init, no vblank or flip was
+ * ever delivered and the FIFO never drained. A title that waits for a flip
+ * hangs there. So the guest runs on a thread of its own, with the same
+ * 256 MB host stack every guest thread gets (sys_ppu_thread.c), and the
+ * main thread turns the run loop until ppu_run returns. Headless runs never
+ * touch the main queue, which is why CI does not see the difference. */
+struct guest_run { uint32_t entry, stack_top; int rc; volatile int done; };
+
+static void* guest_thread(void* arg)
+{
+    guest_run* g = (guest_run*)arg;
+    g->rc = ppu_run(g->entry, g->stack_top);
+    __atomic_store_n(&g->done, 1, __ATOMIC_RELEASE);
+    CFRunLoopStop(CFRunLoopGetMain());
+    return nullptr;
+}
+
+static int run_guest(uint32_t entry, uint32_t stack_top)
+{
+    static guest_run g;
+    g.entry = entry; g.stack_top = stack_top; g.rc = 0; g.done = 0;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 256u * 1024u * 1024u);
+    pthread_t th;
+    int err = pthread_create(&th, &attr, guest_thread, &g);
+    pthread_attr_destroy(&attr);
+    if (err != 0) {
+        fprintf(stderr, "[boot] could not start the guest thread (%d)\n", err);
+        return -1;
+    }
+    /* Short slices: CFRunLoopStop only ends a run that is already going. */
+    while (!__atomic_load_n(&g.done, __ATOMIC_ACQUIRE))
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+    pthread_join(th, nullptr);
+    return g.rc;
+}
+#else
+static int run_guest(uint32_t entry, uint32_t stack_top) { return ppu_run(entry, stack_top); }
+#endif
+
+#ifdef HV_APK
+/* The game data lives in /sdcard/PS3 (EBOOT.ELF and the disc tree under vfs/PS3_GAME), shared with the adb
+ * runs and read through the all-files access the app is granted; log.txt goes to the app's own external
+ * files dir. The app opens straight into the game, so the runner's settings that the adb runs pass as
+ * environment variables become defaults here. */
+extern "C" void hv_vpad_init(void);
+static std::string s_apk_eboot, s_apk_vfs;
+static void apk_prepare(int* argc, char*** argv)
+{
+    const char* files = SDL_AndroidGetExternalStoragePath();
+    std::string log = std::string(files ? files : "/sdcard/PS3") + "/log.txt";
+    const char* data = getenv("HV_DATA");
+    std::string dir = data ? data : "/sdcard/PS3";
+    /* Both streams append to one file: a "w" stdout writes at its own offset and overwrites what stderr adds. */
+    if (FILE* f = fopen(log.c_str(), "w")) fclose(f);
+    freopen(log.c_str(), "a", stdout);
+    freopen(log.c_str(), "a", stderr);
+    /* Shader and pipeline caches in the app's files dir: the SPIR-V of every
+     * translated program (rsx_shader_spirv.cpp) and the device's pipeline
+     * cache (rsx_vulkan_backend.c), so a fight's new shaders compile once. */
+    if (files) {
+        const std::string spv = std::string(files) + "/spirv";
+        mkdir(spv.c_str(), 0775);
+        setenv("PS3RECOMP_SPIRV_CACHE", spv.c_str(), 0);
+        setenv("HV_PIPELINE_CACHE", (std::string(files) + "/pipeline.cache").c_str(), 0);
+    }
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+    /* Optional overrides, one VAR=value per line: the adb runs' environment knobs for the app (HV_PROF=20, ...). */
+    if (FILE* f = fopen((dir + "/hv_env.txt").c_str(), "r")) {
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            line[strcspn(line, "\r\n")] = 0;
+            char* eq = strchr(line, '=');
+            if (eq && line[0] != '#') { *eq = 0; setenv(line, eq + 1, 1); printf("[apk] env %s=%s\n", line, eq + 1); }
+        }
+        fclose(f);
+    }
+    s_apk_eboot = dir + "/EBOOT.ELF";
+    s_apk_vfs   = dir + "/vfs";
+    setenv("PS3_VFS_ROOT", s_apk_vfs.c_str(), 0);
+    /* Save data: cellSaveData writes under $PS3_GAMEDATA_ROOT/dev_hdd0/home/00000001/savedata/<dir>; without it the
+     * path was the cwd-relative ./gamedata, unwritable from the app, and every save failed (-2147306494). */
+    {
+        const std::string gd = dir;                       /* /sdcard/PS3 */
+        std::string p = gd;
+        for (const char* seg : { "/dev_hdd0", "/home", "/00000001", "/savedata" }) { p += seg; mkdir(p.c_str(), 0775); }
+        setenv("PS3_GAMEDATA_ROOT", gd.c_str(), 0);
+    }
+    setenv("HV_VULKAN", "1", 0);
+    setenv("PS3RECOMP_VK_GUEST_PROGRAMS", "1", 0);
+    setenv("PS3RECOMP_VK_WINDOW", "1", 0);
+    setenv("PS3RECOMP_VK_FULLSCREEN", "1", 0);
+    setenv("PS3_VERBOSE", "0", 0);
+    setenv("VK_DRAW_BATCH", "1", 0);  /* one submit per batch of draws, not a GPU round trip per draw: ~2x fps */
+    setenv("VK_DRAW_BATCH_MAX", "128", 0);   /* smaller batches reach the GPU earlier in the frame: fights 18.5 -> 23 fps */
+    setenv("SPU_FLOAT_RZ", "1", 0);   /* SPU code runs in its own round-toward-zero mode: skinning jobs 750 -> 220 us */
+    static char* args[3];
+    args[0] = (char*)"hackversus";
+    args[1] = (char*)s_apk_eboot.c_str();
+    args[2] = (char*)s_apk_vfs.c_str();
+    *argc = 3;
+    *argv = args;
+    hv_vpad_init();   /* stubs.cpp: the on-screen pad's SDL virtual joystick */
+}
+#endif
+
+int main(int argc, char** argv)
+{
+#ifdef HV_APK
+    apk_prepare(&argc, &argv);
+#endif
+    if (argc < 2) {
+        printf("usage: %s <PPU ELF>\n", argv[0]);
+        return 2;
+    }
+
+#ifdef _WIN32
+#pragma comment(lib, "winmm.lib")
+    /* 1 ms timer resolution. The default granularity is about 15.6 ms, which
+     * inflates every shorter wait the title makes and throttles the whole
+     * thing. POSIX timers are already fine-grained. */
+    timeBeginPeriod(1);
+    setvbuf(stdout, NULL, _IONBF, 0);   /* unbuffered: do not lose prints on a kill */
+#endif
+
+    printf("=== ps3recomp game runner ===\n");
+
+    if (!alloc_guest_vm()) {
+        fprintf(stderr, "ERROR: could not allocate the guest address space\n");
+        return 1;
+    }
+
+    uint32_t entry = ppu_load_elf(argv[1]);
+    if (!entry) {
+        fprintf(stderr, "ERROR: could not load %s\n", argv[1]);
+        return 1;
+    }
+
+    /* The boot logos. ccSceneTitleLogo plays a script of step codes (the JP one, 12 steps, at 0x7D9E20):
+     *   0 load, 1 CESA notice, 11 the fan patch note (attention), 4 Bandai Namco + BANDAI logos, 15/16 fades,
+     *   13 CRIWARE, 5 6 7 CyberConnect2 movie, 14 "work of fiction", 17 to the next scene.
+     * Keep Bandai Namco and CRIWARE; the step count is fixed in code, so the script ends early at 17.
+     * HV_INTRO=<codes,...> sets another one; HV_INTRO=orig keeps the title's. */
+    {
+        const char* e = getenv("HV_INTRO");
+        if (!e) e = "0,4,15,13,16,17";
+        if (strcmp(e, "orig") != 0 && vm_base[0x7D9E20 + 3] == 0 && vm_base[0x7D9E20 + 7] == 1) {
+            uint32_t at = 0x7D9E20;
+            for (const char* p = e; *p && at < 0x7D9E20 + 12 * 4; at += 4) {
+                const uint32_t v = (uint32_t)strtoul(p, (char**)&p, 10);
+                vm_base[at] = vm_base[at + 1] = vm_base[at + 2] = 0; vm_base[at + 3] = (uint8_t)v;
+                while (*p == ',' || *p == ' ') p++;
+            }
+            printf("[boot] intro logo script: %s\n", e);
+        }
+    }
+
+    derive_vfs_root(argv[1]);
+    printf("[boot] VFS root: %s\n", ppu_vfs_root);
+
+    /* Title id and category from the disc's PARAM.SFO: without it cellGame answers with a placeholder id
+     * (BLES00000) and every /dev_hdd0/game/<id> path -- the HDD install, the save data -- points elsewhere. */
+    {
+        std::string sfo = std::string(ppu_vfs_root) + "/PS3_GAME/PARAM.SFO";
+        cellGame_init_from_paramsfo(sfo.c_str());
+    }
+
+    ppu_recomp_register();   /* lifted function table -> address map */
+    ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */
+    ppu_hle_init();          /* firmware import NID -> HLE handlers */
+    ppu_sysprx_register();   /* boot-critical CRT */
+    ppu_fs_register();       /* cellFs over the game directory */
+    lv2_init_syscalls();     /* the lv2 syscall table */
+
+    /* Install the guest-callback hook, then start the frame clock. It no-ops
+     * until the title registers its vblank and flip handlers during init. */
+    g_ps3_guest_caller = harness_guest_caller;
+    CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
+
+    printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n",
+           entry, STACK_TOP);
+
+    /* A title that reads its own stack bounds (to find data its parent left
+     * below the top, say) gets the stack it really runs on. */
+    g_ppu_main_stack_addr = STACK_TOP - STACK_SIZE;
+    g_ppu_main_stack_size = STACK_SIZE;
+
+    hv_pin_big("guest main thread");
+    int rc = run_guest(entry, STACK_TOP);
+    printf("\n[boot] ppu_run returned %d (entry function unwound)\n", rc);
+
+    /* A title that called sys_process_exit never reaches this line: that path
+     * ends in the host exit(). Getting here means the entry function returned
+     * instead, so hand back the status the guest published if it published
+     * one. Returning a hardcoded 0 would report success for a run that never
+     * got anywhere. */
+    return g_sys_process_exit_called ? (int)g_sys_process_exit_code : 0;
+}
