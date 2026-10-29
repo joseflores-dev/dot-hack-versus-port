@@ -161,6 +161,10 @@ The whole environment is portable and lives in the project folder; nothing is in
    translated PPU files and the SPUs, links `libmain.so`, packs `game/EBOOT.ELF` as an asset, compiles the Java
    activity and signs with a debug key). A full PPU rebuild takes about 3 minutes on 16 cores.
 
+   **Profile-guided build** (what the releases use, about +2 fps in fights): `HV_PGO=gen HV_BUILD_DIR=build-apk-pgogen
+   tools/build_apk.sh`, play a fight with that APK (it writes `files/hackversus.profraw` every 15 s), merge it with the
+   NDK's `llvm-profdata merge -o pgo/fight.profdata hackversus.profraw` and build with
+   `HV_PGO=use:<path>/pgo/fight.profdata HV_BUILD_DIR=build-apk-pgouse tools/build_apk.sh`.
 4. **Windows**: with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (ucrt, x86_64) unpacked in `toolchain/`
    (no Visual Studio needed), `tools/build_win_deps.sh` once (SDL2 and glslang into `sysroot-win/`) and then
    `tools/build_win.sh` → `out-win/hackversus.exe`. The PC build targets x86-64-v3 (AVX2) and uses the same Vulkan

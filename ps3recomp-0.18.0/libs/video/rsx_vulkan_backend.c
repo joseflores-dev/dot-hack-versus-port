@@ -2169,9 +2169,39 @@ static void vk_swapchain_lost(void)
     if (vk_create_swapchain()) vk_window_drop("the swapchain could not be recreated");
 }
 
+/* VK_ERROR_SURFACE_LOST_KHR: the window behind the surface is gone -- on Android when the screen goes off or the
+ * app leaves the foreground and comes back, the ANativeWindow is a new one. The swapchain and the surface are
+ * dropped and rebuilt from the SDL window, retried every 250 ms until there is a window to build on; until then
+ * presents are skipped (the title keeps running). Without this the game ran on behind a black screen. */
+static int s_vk_surface_lost;
+static Uint64 s_vk_surface_retry_ms;
+static void vk_surface_lost(void)
+{
+    if (!s_vk_surface_lost) VK_LOG("surface lost; rebuilding it when the window is back\n");
+    s_vk_surface_lost = 1;
+    vk_device_idle();
+    __atomic_store_n(&s_vk.window_inflight, 0, __ATOMIC_RELEASE);
+    if (s_vk.swapchain) { pvkDestroySwapchainKHR(s_vk.device, s_vk.swapchain, NULL); s_vk.swapchain = VK_NULL_HANDLE; }
+    if (s_vk.surface) { pvkDestroySurfaceKHR(s_vk.instance, s_vk.surface, NULL); s_vk.surface = VK_NULL_HANDLE; }
+}
+static void vk_surface_retry(void)
+{
+    const Uint64 now = SDL_GetTicks64();
+    if (now < s_vk_surface_retry_ms) return;
+    s_vk_surface_retry_ms = now + 250;
+    if (!s_vk.surface && !SDL_Vulkan_CreateSurface(s_vk.window, s_vk.instance, &s_vk.surface)) {
+        s_vk.surface = VK_NULL_HANDLE;
+        return;
+    }
+    VkBool32 ok = VK_FALSE;
+    if (pvkGetPhysicalDeviceSurfaceSupportKHR(s_vk.phys, s_vk.queue_family, s_vk.surface, &ok) != VK_SUCCESS || !ok) return;
+    if (vk_create_swapchain() == 0) { s_vk_surface_lost = 0; VK_LOG("surface rebuilt\n"); }
+}
+
 /* Blit the offscreen target into the next swapchain image and present it. */
 static void vk_present_window(void)
 {
+    if (s_vk.windowed && s_vk_surface_lost) vk_surface_retry();
     if (!s_vk.windowed || !s_vk.swapchain) return;
 
     /* The window's own command buffer, free once the previous blit is done
@@ -2185,6 +2215,7 @@ static void vk_present_window(void)
     VkResult r = pvkAcquireNextImageKHR(s_vk.device, s_vk.swapchain, UINT64_MAX,
                                         s_vk.sem_acquire, VK_NULL_HANDLE, &idx);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) { vk_swapchain_lost(); return; }
+    if (r == VK_ERROR_SURFACE_LOST_KHR) { vk_surface_lost(); return; }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
         VK_LOG("vkAcquireNextImageKHR failed (VkResult %d)\n", (int)r); return;
     }
@@ -2261,6 +2292,7 @@ static void vk_present_window(void)
     };
     r = vk_queue_present(&pi);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || (r == VK_SUBOPTIMAL_KHR && !s_vk_identity_by_choice)) vk_swapchain_lost();
+    else if (r == VK_ERROR_SURFACE_LOST_KHR) vk_surface_lost();
     else if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) VK_LOG("vkQueuePresentKHR failed (VkResult %d)\n", (int)r);
 }
 

@@ -570,9 +570,14 @@ static void apk_prepare(int* argc, char*** argv)
     setenv("PS3RECOMP_VK_FULLSCREEN", "1", 0);
     setenv("PS3_VERBOSE", "0", 0);
     setenv("VK_DRAW_BATCH", "1", 0);  /* one submit per batch of draws, not a GPU round trip per draw: ~2x fps */
-    setenv("VK_DRAW_BATCH_MAX", "128", 0);   /* smaller batches reach the GPU earlier in the frame: fights 18.5 -> 23 fps */
+    setenv("VK_DRAW_BATCH_MAX", "64", 0);    /* smaller batches reach the GPU earlier in the frame: fights 18.5 -> 23 fps
+                                                (128); 64 measured best on the S22 (256: -2.5 fps, 32/16: -1 to -3) */
     setenv("SPU_FLOAT_RZ", "1", 0);   /* SPU code runs in its own round-toward-zero mode: skinning jobs 750 -> 220 us */
     setenv("PS3_PRIO_START", "1", 0); /* SurMixer's queue key: the new thread runs first, as on lv2 (see the PC build) */
+    /* Texture change checks: the sparse sample every frame, the full hash every 64 frames and no "small texture"
+     * exception. A fight's textures do not change; the hashes were ~16 % of the RSX thread (27.6 -> 29.1 fps). */
+    setenv("HV_TEXHASH_FULL_EVERY", "64", 0);
+    setenv("HV_TEXHASH_SMALL", "0", 0);
     static char* args[3];
     args[0] = (char*)"hackversus";
     args[1] = (char*)s_apk_eboot.c_str();

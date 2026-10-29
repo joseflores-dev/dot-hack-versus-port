@@ -20,6 +20,10 @@ case "${HV_PGO:-}" in
     gen)   PGOF="-fprofile-generate" ;;
     use:*) PGOF="-fprofile-use=$(cygpath -m "${HV_PGO#use:}") -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin" ;;
 esac
+# HV_LTO=1: ThinLTO across the runtime and the 64 translated PPU files (combines with HV_PGO).
+[ "${HV_LTO:-0}" = 1 ] && PGOF="$PGOF -flto=thin"
+# HV_SPU_FAST=1: SPU float ops in round-toward-zero mode as the bare NEON instruction (SPU_RZ_FAST, spu_helpers.h).
+[ "${HV_SPU_FAST:-0}" = 1 ] && PGOF="$PGOF -DSPU_RZ_FAST"
 OUT=$P/out; B=$P/build-apk-java
 mkdir -p "$OUT"; rm -rf "$B"; mkdir -p "$B/classes" "$B/dex" "$B/res"
 

@@ -1218,8 +1218,12 @@ static u64 eng_texture_content_hash(u32 location, u32 offset, u32 span,
  * sampled blocks is left to the full hash, which every texture still gets
  * every ENG_TEXHASH_FULL_EVERY frames. */
 #define ENG_TEXHASH_STRIDE      2048u
-#define ENG_TEXHASH_FULL_EVERY  8u          /* a power of two */
-#define ENG_TEXHASH_SMALL       16384u      /* at or below: full every frame */
+/* HV_TEXHASH_FULL_EVERY=<n> (a power of two, default 8) and HV_TEXHASH_SMALL=<bytes> (default 16384), read at
+ * engine init: in a .hack//Versus fight these hashes were ~16 % of the RSX thread. */
+static u32 s_texhash_full_every = 8u;
+static u32 s_texhash_small = 16384u;
+#define ENG_TEXHASH_FULL_EVERY  s_texhash_full_every   /* a power of two */
+#define ENG_TEXHASH_SMALL       s_texhash_small        /* at or below: full every frame */
 static u64 eng_texture_sparse_hash(u32 location, u32 offset, u32 span,
                                    int* readable)
 {
@@ -3578,6 +3582,11 @@ int rsx_draw_engine_init(u32 width, u32 height)
     g.height = height ? height : 720;
     { const char* e = getenv("PS3RECOMP_ENG_TEXHASH_FULL");
       s_texhash_full_always = e && *e && strcmp(e, "0") != 0; }
+    { const char* e = getenv("HV_TEXHASH_FULL_EVERY");
+      const long n = e ? atol(e) : 0;
+      if (n > 0 && (n & (n - 1)) == 0) s_texhash_full_every = (u32)n; }
+    { const char* e = getenv("HV_TEXHASH_SMALL");
+      if (e && *e) s_texhash_small = (u32)atol(e); }
     { const char* e = getenv("PS3RECOMP_ENG_DEPTH_VIA_GUEST");
       s_depth_via_guest = e && *e && strcmp(e, "0") != 0; }
     g.vp_cb = (u8*)calloc(1, ENG_VP_CB_BYTES);
