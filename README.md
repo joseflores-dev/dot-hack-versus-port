@@ -32,17 +32,16 @@ emula sobre Vulkan. Probado en un Samsung Galaxy S22 Ultra (Snapdragon 8 Gen 1, 
 ## Instalación
 
 1. Descarga `hackversus.apk` de la sección **Releases** e instálalo.
-2. Dale a la app el permiso "Acceso a todos los archivos" (Ajustes → Aplicaciones → .hack//Versus → Permisos), o por adb:
-   ```
-   adb shell appops set com.hackversus.port MANAGE_EXTERNAL_STORAGE allow
-   ```
-3. Prepara los datos del juego en `/sdcard/PS3/`:
+2. Prepara los datos del juego en `/sdcard/PS3/` (o, si prefieres no dar permisos, en
+   `Android/data/com.hackversus.port/files/PS3/`, que la app lee sin pedir nada):
    - `EBOOT.ELF`: el ejecutable **descifrado** del juego. La forma más sencilla es dejar que un emulador lo vuelque:
      en ARMSX3/RPCS3 activa `Core: PPU Debug` y arranca el juego una vez; el ELF queda en
      `cache/ppu_progs/BLJS93008-*/exec.elf`.
    - `vfs/PS3_GAME/`: el contenido del disco. En el PC: `python tools/iso_extract.py <tu.iso> all disc` y copia
      `disc/PS3_GAME` a `/sdcard/PS3/vfs/PS3_GAME` (unos 4 GB; `adb push` sirve).
-4. Abre la app. La primera vez instala sus datos y compila los shaders: tarda más; las siguientes arranca en ~20 s.
+3. Abre la app. Si los datos están en `/sdcard/PS3`, la primera vez te lleva al interruptor "Acceso a todos los
+   archivos" de la propia app: actívalo y vuelve. La primera vez el juego instala sus datos y compila los shaders,
+   así que tarda más; las siguientes arranca en ~20 s.
 
 Estructura final en el teléfono:
 ```

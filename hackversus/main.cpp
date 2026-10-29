@@ -461,6 +461,12 @@ static void apk_prepare(int* argc, char*** argv)
     std::string log = std::string(files ? files : "/sdcard/PS3") + "/log.txt";
     const char* data = getenv("HV_DATA");
     std::string dir = data ? data : "/sdcard/PS3";
+    /* The app's own external files dir needs no permission: if the player put the data there
+     * (Android/data/com.hackversus.port/files/PS3/EBOOT.ELF), prefer it over /sdcard/PS3. */
+    if (!data && files) {
+        const std::string own = std::string(files) + "/PS3";
+        if (FILE* f = fopen((own + "/EBOOT.ELF").c_str(), "rb")) { fclose(f); dir = own; }
+    }
     /* Both streams append to one file: a "w" stdout writes at its own offset and overwrites what stderr adds. */
     if (FILE* f = fopen(log.c_str(), "w")) fclose(f);
     freopen(log.c_str(), "a", stdout);
