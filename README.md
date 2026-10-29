@@ -1,112 +1,116 @@
-# .hack//Versus — port nativo para Android
+# .hack//Versus — native Android port
+
+*English. [Versión en español](README.es.md).*
 
 > [!IMPORTANT]
-> No se incluye ningún archivo del juego. Necesitas tu propia copia legal de **.hack//Versus** (PlayStation 3,
-> BLJS93008) como imagen de disco (`.iso`). Es un proyecto de aficionado, sin relación con CyberConnect2, Bandai Namco
-> ni Sony.
+> No game files are included. You need your own legally obtained copy of **.hack//Versus** (PlayStation 3,
+> BLJS93008) as a disc image (`.iso`). A fan project, not affiliated with CyberConnect2, Bandai Namco or Sony.
 
 > [!NOTE]
-> Trabajo en curso. Las peleas, los menús, el guardado y el mando funcionan; el Story Mode y los modos online no se
-> han recorrido de punta a punta. Informes de fallos y mejoras son bienvenidos: abre un issue o un pull request.
+> Work in progress. Fights, menus, saving and controllers work; Story Mode and the online modes have not been played
+> through. Bug reports, fixes and improvements are very welcome: open an issue or a pull request.
 
-Port **nativo** (sin emulador) del juego de lucha .hack//Versus a Android ARM64, hecho por recompilación estática
-con [ps3recomp](https://github.com/sp00nznet/ps3recomp): el código PPU del juego está traducido a C++ y compilado para
-el teléfono, los programas SPU están traducidos igual y la GPU RSX se emula sobre Vulkan. No es un emulador.
-Probado en un Samsung Galaxy S22 Ultra (Snapdragon 8 Gen 1, Adreno 730, Android 16).
+A **native** port (no emulator) of the fighting game .hack//Versus to Android ARM64, made by static recompilation
+with [ps3recomp](https://github.com/sp00nznet/ps3recomp): the game's PPU code is translated to C++ and compiled for
+the phone, its SPU programs are translated the same way, and the RSX GPU is emulated on Vulkan. It is not an emulator.
+Tested on a Samsung Galaxy S22 Ultra (Snapdragon 8 Gen 1, Adreno 730, Android 16).
 
-![Pelea: Sora vs Sora en Aura's Garden](docs/pelea.png)
+![Fight: Sora vs Sora in Aura's Garden](docs/pelea.png)
 
-## Características
+## Features
 
-- El juego corre como una app nativa: instala el APK, elige tu ISO y juega. Sin firmware de PS3, sin extraer nada.
-- Lee la imagen de disco directamente (lector ISO9660 propio), sin copiarla ni pedir permisos de almacenamiento.
-- Mando Bluetooth (DualShock 4 y compatibles) con el mapeo de la PS3, incluidos L3/R3; pad táctil en pantalla
-  que se puede ocultar (botón **PAD**).
-- Guardado, sonido (música, voces y golpes), intro recortada a los logos, pantalla completa.
-- Rendimiento: menús a 30 fps (tope del juego); peleas a 25–27 fps con el ahorro de batería del teléfono activado.
+- The game runs as a native app: install the APK, pick your ISO, play. No PS3 firmware, nothing to extract.
+- Reads the disc image in place (its own ISO9660 reader): no copy, no storage permission.
+- Bluetooth controllers (DualShock 4 and compatibles) with the PS3 mapping, L3/R3 included; an on-screen touch pad
+  that can be hidden (**PAD** button).
+- Saving, sound (music, voices and hits), intro trimmed to the logos, full-screen rendering.
+- Performance: menus at 30 fps (the game's cap); fights at 25–27 fps with the phone's battery saver on.
 
-![Título](docs/titulo.png)
+![Title](docs/titulo.png)
 
-## Requisitos
+## Requirements
 
-- Teléfono ARM64 con Vulkan 1.1 y Android 12 o superior; 8 GB de RAM recomendados.
-- Unos 4,3 GB libres para la ISO (la app no la copia). El APK ocupa 35 MB.
-- Tu imagen de disco de .hack//Versus (ver "Versiones compatibles").
+- An ARM64 phone with Vulkan 1.1 and Android 12 or later; 8 GB of RAM recommended.
+- About 4.3 GB free for the ISO (the app does not copy it) plus 2 GB for the game's own HDD install. The APK is 35 MB.
+- Your disc image of .hack//Versus (see "Supported versions").
 
-## Versiones compatibles
+## Supported versions
 
-| Disco | Estado |
+| Disc | Status |
 |---|---|
-| BLJS93008 (Japón, el único lanzamiento del juego) con el parche de traducción al inglés aplicado | Es la versión con la que se hizo el port y con la que se ha probado todo |
-| BLJS93008 sin parchear | Debería funcionar (el ejecutable que lleva el APK es el del parche; los textos vendrían en japonés), no probado |
-| Otras regiones o versiones digitales | No existen para este juego |
+| BLJS93008 (Japan, the game's only release) with the English translation patch applied | The version the port was made and tested with |
+| BLJS93008 unpatched | Should work (the executable shipped in the APK is the patched one; texts would be Japanese), untested |
+| Other regions or digital versions | None exist for this game |
 
-El APK incluye el ejecutable del juego ya traducido (lo que en la PS3 era el `EBOOT.BIN`): no hace falta descifrar
-nada ni usar un emulador. Si tienes un `EBOOT.ELF` propio, la app lo prefiere si está junto a los datos.
+The APK ships the game's executable already translated (what the PS3 ran as `EBOOT.BIN`): nothing to decrypt, no
+emulator needed. If you have your own `EBOOT.ELF`, the app prefers it when it sits next to the data.
 
-## Cómo jugar
+## How to play
 
-1. Descarga `hackversus.apk` de **Releases** e instálalo (permite "instalar apps desconocidas" si Android lo pide).
-2. Copia tu `.iso` al teléfono, en cualquier carpeta (Descargas, por ejemplo).
-3. Abre la app y pulsa **Elegir ISO**: se abre el selector de archivos de Android; marca tu imagen. La app guarda el
-   permiso sobre ese archivo y no vuelve a preguntar. La primera vez tarda algo más (instala sus datos y compila
-   shaders); después arranca en unos 20 segundos.
+1. Download `hackversus.apk` from **Releases** and install it (allow "unknown apps" if Android asks).
+2. Copy your `.iso` to the phone, any folder (Downloads, for instance).
+3. Open the app and tap **Elegir ISO** ("Choose ISO"): Android's file picker opens; select your image. The app keeps
+   the permission on that file and never asks again. The first run takes longer (the game installs ~2 GB to its
+   virtual HDD, as on the PS3, and shaders compile); afterwards it starts in about 20 seconds.
 
-Alternativas, si prefieres no usar el selector:
-- Deja la ISO en `/sdcard/PS3/` y pulsa **Dar permiso** en el diálogo (abre el interruptor "Acceso a todos los
-  archivos" de la app). Es la misma carpeta y el mismo archivo que usa el emulador ARMSX3, por si tienes ambos.
-- O extrae el disco en el PC (`python tools/iso_extract.py <tu.iso> all disc`) y copia `disc/PS3_GAME` a
-  `/sdcard/PS3/vfs/PS3_GAME` o a `Android/data/com.hackversus.port/files/PS3/vfs/PS3_GAME` (esta última sin permiso).
+Alternatives, if you would rather not use the picker:
+- Leave the ISO in `/sdcard/PS3/` and tap **Dar permiso** ("Grant permission") in the dialog: it opens the app's
+  own "All files access" switch. Same folder and same file the ARMSX3 emulator uses, in case you have both.
+- Or extract the disc on a PC (`python tools/iso_extract.py <your.iso> all disc`) and copy `disc/PS3_GAME` to
+  `/sdcard/PS3/vfs/PS3_GAME` or to `Android/data/com.hackversus.port/files/PS3/vfs/PS3_GAME` (the latter needs no
+  permission).
 
-Dónde deja las cosas la app:
+Where the app keeps things:
 ```
 Android/data/com.hackversus.port/files/
-  PS3/dev_hdd0/home/00000001/savedata/   partidas (modo ISO; con /sdcard/PS3 van en /sdcard/PS3/dev_hdd0/...)
-  PS3/hv_env.txt                          opciones (ver abajo)
-  EBOOT.ELF, spirv/, pipeline.cache       el ejecutable desempaquetado y las cachés de shaders
-  log.txt                                 registro de la sesión (se vacía en cada arranque)
+  PS3/dev_hdd0/game/BLJS93008/           the game's HDD install (~2 GB, made by the game itself)
+  PS3/dev_hdd0/home/00000001/savedata/   saves (with /sdcard/PS3 they go to /sdcard/PS3/dev_hdd0/...)
+  PS3/hv_env.txt                          options (see below)
+  EBOOT.ELF, spirv/, pipeline.cache       the unpacked executable and the shader caches
+  log.txt                                 the session log (truncated at every launch)
 ```
-Desinstalar la app borra esa carpeta, partidas incluidas: cópialas antes si te importan.
+Uninstalling the app deletes that folder, saves included: copy them first if they matter to you.
 
-## Controles
+## Controls
 
-- **Mando Bluetooth**: empareja un DualShock 4 (o compatible) con Android antes de abrir la app; el port lo asigna al
-  puerto 1 con el mapeo de la PS3 (✕○□△, L1/R1/L2/R2, L3/R3, START/SELECT, cruceta y sticks).
-- **Pad táctil**: siempre activo como jugador 1; el botón **PAD** (arriba al centro) lo oculta o lo muestra.
-- Los controles del juego están en el propio juego: en una pelea, START → "Basic Operation", "Command List" y
+- **Bluetooth controller**: pair a DualShock 4 (or compatible) with Android before opening the app; the port assigns
+  it to port 1 with the PS3 mapping (✕○□△, L1/R1/L2/R2, L3/R3, START/SELECT, d-pad and sticks).
+- **Touch pad**: always active as player 1; the **PAD** button (top centre) hides or shows it.
+- The game's own controls are in the game: during a fight, START → "Basic Operation", "Command List" and
   "Battle Key Config".
 
-## Opciones (`hv_env.txt`)
+## Options (`hv_env.txt`)
 
-Archivo `hv_env.txt` en la carpeta de datos (`Android/data/com.hackversus.port/files/PS3/` en modo ISO, o
-`/sdcard/PS3/`), una `VARIABLE=valor` por línea:
+A file named `hv_env.txt` in the data folder (`Android/data/com.hackversus.port/files/PS3/` in ISO mode, or
+`/sdcard/PS3/`), one `VARIABLE=value` per line:
 
-| Variable | Efecto |
+| Variable | Effect |
 |---|---|
-| `PS3_OSK_TEXT=NOMBRE` | Nombre que el port escribe cuando el juego pide texto (Story Mode: máximo 8 caracteres, el juego no deja cambiarlo después). Por defecto `PLAYER`. |
-| `HV_KEEP_ASPECT=1` | 16:9 con barras en vez de estirar a toda la pantalla. |
-| `HV_INTRO=orig` | Intro completa (por defecto se muestran solo los logos de Bandai Namco y CRIWARE). |
-| `HV_JC_PAR=n` | Hilos para los jobs SPU (3 por defecto). |
-| `HV_AUDIO_LEGACY_PACE=1` | Mezclador de audio original de ps3recomp (por si el nuevo suena peor en tu equipo). |
-| `HV_LOG=0` | Sin registro: no se escribe `log.txt`. |
+| `PS3_OSK_TEXT=NAME` | What the port types when the game asks for text (Story Mode: 8 characters at most, and the game does not let you change it later). Default `PLAYER`. |
+| `HV_KEEP_ASPECT=1` | 16:9 with bars instead of stretching to the whole screen. |
+| `HV_INTRO=orig` | The full intro (by default only the Bandai Namco and CRIWARE logos are shown). |
+| `HV_JC_PAR=n` | Threads for the SPU jobs (3 by default). |
+| `HV_AUDIO_LEGACY_PACE=1` | ps3recomp's original audio mixer (in case the new one sounds worse on your device). |
+| `HV_LOG=0` | No log: `log.txt` is not written. |
 
-## Problemas conocidos
+## Known issues
 
-- Las peleas no llegan a los 30 fps estables con el ahorro de batería activado (los núcleos quedan a 1,2–1,8 GHz);
-  sin él sobra margen. El cuello es la CPU (hilo principal, jobs SPU de skinning, comandos RSX), no la GPU.
-- El Story Mode pide un nombre de personaje por teclado en pantalla: el port lo rellena solo (`PS3_OSK_TEXT`).
-- Sin online, sin trofeos reales, sin música del usuario (todo son stubs).
-- Tras una sesión larga el teléfono se calienta y baja de frecuencia: es normal, no es un fallo del port.
+- Fights do not hold a steady 30 fps with the battery saver on (the cores stay at 1.2–1.8 GHz); without it there is
+  headroom. The bottleneck is the CPU (the game's main thread, the SPU skinning jobs, the RSX command stream), not
+  the GPU.
+- Story Mode asks for a character name through the on-screen keyboard: the port fills it in by itself (`PS3_OSK_TEXT`).
+- No online, no real trophies, no user music (all stubs).
+- After a long session the phone heats up and lowers its clocks: normal, not a port bug.
 
-## Cómo se construye
+## Building
 
-Todo el entorno es portátil y vive en la carpeta del proyecto; nada se instala en el sistema.
+The whole environment is portable and lives in the project folder; nothing is installed system-wide.
 
-1. **Toolchain** (no incluido): Android NDK r30, CMake ≥ 3.28, Ninja, JDK 17, build-tools 35.0.1 y `android.jar`
-   de API 35, Python 3.10 con `pip install -r ps3recomp-0.18.0/requirements.txt`, y en `sysroot/` SDL2 y glslang
-   compilados para `arm64-v8a`.
-2. **Lift del juego** (una vez, en el PC; `game/EBOOT.ELF` es el ejecutable descifrado, que un emulador con
-   `PPU Debug` vuelca en `cache/ppu_progs/BLJS93008-*/exec.elf`):
+1. **Toolchain** (not included): Android NDK r30, CMake ≥ 3.28, Ninja, JDK 17, build-tools 35.0.1 and the API 35
+   `android.jar`, Python 3.10 with `pip install -r ps3recomp-0.18.0/requirements.txt`, and in `sysroot/` SDL2 and
+   glslang built for `arm64-v8a`.
+2. **Lifting the game** (once, on the PC; `game/EBOOT.ELF` is the decrypted executable, which an emulator with
+   `PPU Debug` dumps to `cache/ppu_progs/BLJS93008-*/exec.elf`):
    ```
    P=.venv/Scripts/python; R=ps3recomp-0.18.0/tools
    $P $R/ppu_loader.py game/EBOOT.ELF -o analysis/
@@ -115,36 +119,35 @@ Todo el entorno es portátil y vive en la carpeta del proyecto; nada se instala 
    $P $R/ppu_lifter.py game/EBOOT.ELF --functions analysis/functions.json --hle-stubs analysis/EBOOT.imports.json \
        --code-end 0x7bf7b0 --chunks 64 -o recomp/
    ```
-   Los jobs SPURS (skinning) no están en el ELF: se vuelcan en el teléfono con `SPU_DUMP_MISS=<dir>` la primera vez
-   que el juego los usa y van a `spu_jobs/*.elf`.
-3. **APK**: `tools/build_apk.sh` → `out/hackversus.apk` (configura CMake con el NDK, compila el runtime, los 64 archivos
-   PPU traducidos y los SPU, enlaza `libmain.so`, mete `game/EBOOT.ELF` como asset, compila la actividad Java y
-   firma con una clave de depuración). El código PPU completo recompila en unos 3 minutos con 16 núcleos.
+   The SPURS jobs (skinning) are not in the ELF: they are dumped on the phone with `SPU_DUMP_MISS=<dir>` the first
+   time the game uses them and go to `spu_jobs/*.elf`.
+3. **APK**: `tools/build_apk.sh` → `out/hackversus.apk` (configures CMake with the NDK, builds the runtime, the 64
+   translated PPU files and the SPUs, links `libmain.so`, packs `game/EBOOT.ELF` as an asset, compiles the Java
+   activity and signs with a debug key). A full PPU rebuild takes about 3 minutes on 16 cores.
 
-Los scripts de `tools/` (`goto_fight.sh`, `measure_fight.sh`, `prof_threads_fast.py`, …) sirven para llegar a una
-pelea sin tocar el teléfono, medir fps y perfilar; llevan escrito el identificador adb del equipo con que se desarrolló,
-cámbialo por el tuyo.
+The scripts in `tools/` (`goto_fight.sh`, `measure_fight.sh`, `prof_threads_fast.py`, …) reach a fight without
+touching the phone, measure fps and profile; they carry the adb id of the device the port was developed on, change it
+to yours.
 
-## Qué cambia respecto a ps3recomp 0.18.0
+## What changed from ps3recomp 0.18.0
 
-El toolkit va incluido en `ps3recomp-0.18.0/` con las modificaciones de este port (licencia MIT, ver su `LICENSE`).
-Entre otras: backend Vulkan para Android (render passes fusionados, lotes de dibujos, present asíncrono, profundidad
-leída como color en compute), escalarización de los bancos de registros de los shaders para Adreno, jobs SPURS en
-paralelo con hilos, colas de eventos SPU del driver de sonido, VMX y FP escalar en NEON/sin comprobaciones de NaN,
-fetch de vértices e índices en NEON, `cellOskDialog` funcional, guardado, pad táctil y mando. El lector de ISO
-(`hackversus/isofs.c`) se cuelga debajo de la API de archivos del host con `--wrap` del enlazador, así que ninguna
-capa del runtime cambia. Los detalles técnicos están en los comentarios del código.
+The toolkit is included in `ps3recomp-0.18.0/` with this port's modifications (MIT licence, see its `LICENSE`).
+Among others: a Vulkan backend for Android (merged render passes, draw batches, asynchronous present, depth read as
+colour in compute), scalarised shader register files for Adreno, SPURS jobs in parallel on threads, SPU event queues
+for the sound driver, VMX and scalar FP in NEON without NaN checks, NEON vertex and index fetch, a working
+`cellOskDialog`, saving, the touch pad and the controller. The ISO reader (`hackversus/isofs.c`) hangs under the host
+file API with the linker's `--wrap`, so no runtime layer changes. The technical details are in the code comments.
 
-## Créditos
+## Credits
 
-- CyberConnect2 y Bandai Namco, creadores de .hack//Versus.
-- [sp00nznet](https://github.com/sp00nznet/ps3recomp), por ps3recomp.
-- El equipo del parche de traducción al inglés de .hack//Versus.
-- SDL2, glslang y el NDK de Android.
+- CyberConnect2 and Bandai Namco, creators of .hack//Versus.
+- [sp00nznet](https://github.com/sp00nznet/ps3recomp), for ps3recomp.
+- The team behind the .hack//Versus English translation patch.
+- SDL2, glslang and the Android NDK.
 
-## Licencia
+## License
 
-El código de este repositorio es [MIT](LICENSE), como ps3recomp; los componentes de terceros conservan sus licencias.
-No concede ningún derecho sobre el juego: .hack//Versus es propiedad de CyberConnect2 y Bandai Namco. Este repositorio
-no contiene datos del juego; el APK contiene el código del juego traducido a ARM64 por la recompilación estática y no
-funciona sin una copia legítima del disco. Si los titulares de los derechos lo piden, se retira.
+The code in this repository is under the [MIT license](LICENSE), like ps3recomp; third-party components keep their
+own licenses. It grants no rights to the game: .hack//Versus belongs to CyberConnect2 and Bandai Namco. This
+repository contains no game data; the APK contains the game's code translated to ARM64 by static recompilation and
+does not work without a legitimate copy of the disc. If the rights holders ask, it comes down.
