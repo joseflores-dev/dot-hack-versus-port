@@ -93,8 +93,6 @@ _harness/
 .pr_review/
 _drill/
 
-# Local Claude Code settings
-.claude/
 
 # macOS packaging output
 *.dmg
