@@ -41,7 +41,7 @@ Windows 10 PC (Ryzen 7 5700X3D, GeForce RTX 3050).
 
 **Windows**
 - Windows 10 or 11, 64-bit, a CPU with AVX2 (Intel Haswell / AMD Zen or later) and a GPU with Vulkan 1.1 drivers.
-- About 4.3 GB for the extracted disc plus 2 GB for the game's HDD install.
+- Your ISO plus about 2 GB for the game's HDD install.
 
 ## Supported versions
 
@@ -84,13 +84,14 @@ Uninstalling the app deletes that folder, saves included: copy them first if the
 
 1. Download `hackversus-windows.zip` from **Releases** and unzip it anywhere: `hackversus.exe`, `SDL2.dll` and the
    game's translated executable `EBOOT.ELF`.
-2. Extract your disc next to them, into a folder named `disc` (needs Python 3):
-   `python tools/iso_extract.py <your.iso> all disc` — the result is `disc/PS3_GAME/...`.
-3. Run `hackversus.exe`. The first run takes longer (the ~2 GB HDD install and the shader caches).
+2. Run `hackversus.exe` and choose your `.iso` in the dialog (or drop the `.iso` onto `hackversus.exe`). The game
+   remembers it; the next starts go straight in. The first run takes longer (the ~2 GB HDD install and the shader
+   caches).
 
-The PC version does not read the ISO directly yet. Saves, the HDD install and the shader caches go to `data/` next to
-the executable; options go in `hv_env.txt` next to it. You can also pass the paths:
-`hackversus.exe <EBOOT.ELF> <disc folder>`.
+Nothing to extract and nothing to install: Windows mounts the ISO read-only (the same mount as double-clicking it in
+Explorer) while the game runs, and unmounts it when the game closes. Saves, the HDD install, the shader caches and
+`log.txt` go to `data/` next to the executable; options go in `hv_env.txt` next to it. An extracted disc in a `disc`
+folder next to the executable also works.
 
 ## Controls
 

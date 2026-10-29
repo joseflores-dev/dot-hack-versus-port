@@ -580,18 +580,143 @@ static void apk_prepare(int* argc, char*** argv)
 #endif
 
 #ifdef HV_PC
-/* The PC build (llvm-mingw, Vulkan through SDL2, the same backend and settings as the APK). With no arguments
- * it looks beside the executable for EBOOT.ELF and the extracted disc in disc/ (PS3_GAME/...). */
+/* The PC build (llvm-mingw, Vulkan through SDL2, the same backend and settings as the APK). The disc is the
+ * player's ISO, mounted read-only by Windows itself for as long as the game runs (the same mount Explorer does on a
+ * double-click; the handle dies with the process and the drive goes away). Where the ISO comes from, in order:
+ *   hackversus.exe <file.iso>          (also an .iso dropped on the executable)
+ *   hackversus.exe <EBOOT.ELF> <dir>   (an extracted disc, as before)
+ *   disc\ beside the executable        (an extracted disc)
+ *   data\iso_path.txt                  (the ISO chosen last time)
+ *   a file dialog                      (first run)
+ * EBOOT.ELF, the game's translated executable, ships beside hackversus.exe. */
+#include <commdlg.h>
+#include <shellapi.h>
+#include <virtdisk.h>
 static std::string s_pc_eboot, s_pc_vfs;
+
+static std::string pc_utf8(const std::wstring& w)
+{
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, NULL, 0, NULL, NULL);
+    std::string s(n > 0 ? n - 1 : 0, '\0');
+    if (n > 1) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &s[0], n, NULL, NULL);
+    return s;
+}
+static std::wstring pc_wide(const std::string& s)
+{
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, NULL, 0);
+    std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], n);
+    return w;
+}
+static void pc_error(const wchar_t* msg)
+{
+    fprintf(stderr, "[pc] %s\n", pc_utf8(msg).c_str());
+    MessageBoxW(NULL, msg, L".hack//Versus", MB_OK | MB_ICONERROR);
+}
+static bool pc_is_disc_root(const std::string& root)
+{
+    return GetFileAttributesA((root + "/PS3_GAME/PARAM.SFO").c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+/* A drive letter whose root holds this game's disc ("E:"), or "" -- also finds an ISO the player mounted. */
+static std::string pc_find_disc_drive(DWORD mask)
+{
+    for (int i = 2; i < 26; i++) {
+        if (!(mask >> i & 1)) continue;
+        const std::string root = std::string(1, (char)('A' + i)) + ":";
+        const UINT type = GetDriveTypeA((root + "\\").c_str());
+        if (type != DRIVE_CDROM && type != DRIVE_REMOVABLE && type != DRIVE_FIXED) continue;
+        if (!pc_is_disc_root(root)) continue;
+        char sfo[4096] = {0};
+        if (FILE* f = fopen((root + "/PS3_GAME/PARAM.SFO").c_str(), "rb")) { fread(sfo, 1, sizeof sfo - 1, f); fclose(f); }
+        for (size_t k = 0; k + 9 <= sizeof sfo; k++) if (memcmp(sfo + k, "BLJS93008", 9) == 0) return root;
+    }
+    return "";
+}
+static std::string pc_mount_iso(const std::wstring& iso)
+{
+    static HANDLE h = NULL;   /* kept open: the mount lives as long as this handle, i.e. the process */
+    VIRTUAL_STORAGE_TYPE vst = { VIRTUAL_STORAGE_TYPE_DEVICE_ISO, VIRTUAL_STORAGE_TYPE_VENDOR_MICROSOFT };
+    const DWORD before = GetLogicalDrives();
+    DWORD r = OpenVirtualDisk(&vst, iso.c_str(), VIRTUAL_DISK_ACCESS_READ, OPEN_VIRTUAL_DISK_FLAG_NONE, NULL, &h);
+    if (r == ERROR_SUCCESS) r = AttachVirtualDisk(h, NULL, ATTACH_VIRTUAL_DISK_FLAG_READ_ONLY, 0, NULL, NULL);
+    printf("[pc] mounting %s -> %lu\n", pc_utf8(iso).c_str(), (unsigned long)r);
+    /* The new letter shows up a moment after the attach; an image already mounted (by Explorer, say) fails to
+     * attach a second time but is found among the drives all the same. */
+    for (int t = 0; t < 50; t++) {
+        const DWORD now = GetLogicalDrives();
+        std::string d = pc_find_disc_drive(r == ERROR_SUCCESS ? now & ~before : now);
+        if (d.empty() && r == ERROR_SUCCESS && t > 20) d = pc_find_disc_drive(now);
+        if (!d.empty()) { printf("[pc] disc at %s\n", d.c_str()); return d; }
+        Sleep(100);
+    }
+    return "";
+}
+static std::wstring pc_pick_iso(void)
+{
+    wchar_t file[MAX_PATH * 4] = L"";
+    OPENFILENAMEW ofn = {};
+    ofn.lStructSize = sizeof ofn;
+    ofn.lpstrFilter = L"PS3 disc image (*.iso)\0*.iso\0All files\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = sizeof file / sizeof file[0];
+    ofn.lpstrTitle = L".hack//Versus (BLJS93008): choose your disc image";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    return GetOpenFileNameW(&ofn) ? std::wstring(file) : std::wstring();
+}
+static bool pc_ends_with_iso(const std::wstring& p)
+{
+    return p.size() > 4 && _wcsicmp(p.c_str() + p.size() - 4, L".iso") == 0;
+}
+
 static void pc_prepare(int* argc, char*** argv)
 {
     char exe[1024];
     DWORD n = GetModuleFileNameA(NULL, exe, sizeof exe);
     std::string dir(exe, n);
     dir = dir.substr(0, dir.find_last_of("\\/"));
-    if (*argc < 2) {
+    const std::string gd = dir + "/data";
+    CreateDirectoryA(gd.c_str(), NULL);
+    /* A GUI executable (-mwindows) started from Explorer has no stdout/stderr: the log goes to data\log.txt, truncated
+     * at every start. Started from a console with redirection, the streams stay where they were sent. */
+    if (GetStdHandle(STD_OUTPUT_HANDLE) == NULL || GetStdHandle(STD_ERROR_HANDLE) == NULL) {
+        const std::string log = gd + "/log.txt";
+        if (FILE* f = fopen(log.c_str(), "w")) fclose(f);
+        freopen(log.c_str(), "a", stdout);
+        freopen(log.c_str(), "a", stderr);
+        setvbuf(stdout, NULL, _IOLBF, 0);
+        setvbuf(stderr, NULL, _IONBF, 0);
+    }
+    if (*argc < 3) {
         s_pc_eboot = dir + "/EBOOT.ELF";
-        s_pc_vfs   = dir + "/disc";
+        int wargc = 0;
+        wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+        std::wstring iso = wargc >= 2 && pc_ends_with_iso(wargv[1]) ? std::wstring(wargv[1]) : std::wstring();
+        if (wargv) LocalFree(wargv);
+        const std::string saved = gd + "/iso_path.txt";
+        if (iso.empty() && pc_is_disc_root(dir + "/disc")) s_pc_vfs = dir + "/disc";
+        else {
+            if (iso.empty())
+                if (FILE* f = fopen(saved.c_str(), "rb")) {
+                    char line[4096] = {0};
+                    if (fgets(line, sizeof line, f)) { line[strcspn(line, "\r\n")] = 0; iso = pc_wide(line); }
+                    fclose(f);
+                    if (!iso.empty() && GetFileAttributesW(iso.c_str()) == INVALID_FILE_ATTRIBUTES) iso.clear();
+                }
+            if (iso.empty()) iso = pc_pick_iso();
+            if (iso.empty()) exit(0);   /* the dialog was cancelled */
+            s_pc_vfs = pc_mount_iso(iso);
+            if (s_pc_vfs.empty()) {
+                pc_error(L"Windows could not mount the disc image, or it is not .hack//Versus (BLJS93008).\n"
+                         L"Choose the ISO again on the next start, or extract it into a 'disc' folder next to hackversus.exe.");
+                DeleteFileA(saved.c_str());
+                exit(1);
+            }
+            if (FILE* f = fopen(saved.c_str(), "wb")) { fputs(pc_utf8(iso).c_str(), f); fclose(f); }
+        }
+        if (GetFileAttributesA(s_pc_eboot.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            pc_error(L"EBOOT.ELF is missing: it ships next to hackversus.exe in the release zip.");
+            exit(1);
+        }
         static char* args[3];
         args[0] = (*argv)[0];
         args[1] = (char*)s_pc_eboot.c_str();
@@ -601,9 +726,7 @@ static void pc_prepare(int* argc, char*** argv)
     }
     if (*argc >= 3) _putenv_s("PS3_VFS_ROOT", (*argv)[2]);
     /* Saves and the HDD install (~2 GB of DATA.CPK on first run) beside the executable. */
-    const std::string gd = dir + "/data";
     std::string p = gd;
-    CreateDirectoryA(p.c_str(), NULL);
     for (const char* seg : { "/dev_hdd0", "/home", "/00000001", "/savedata" }) { p += seg; CreateDirectoryA(p.c_str(), NULL); }
     CreateDirectoryA((gd + "/dev_hdd0/game").c_str(), NULL);
     CreateDirectoryA((gd + "/spirv").c_str(), NULL);
