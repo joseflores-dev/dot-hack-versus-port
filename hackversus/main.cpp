@@ -133,7 +133,7 @@ void     cellGcm_fifo_kick_wait(unsigned ms); /* sleep up to ms, waking at once 
  * path anywhere else -- the same selection runtime/host/host_posix.c and the
  * toolkit's boot harness make. All three expose the same three entry points,
  * so the frame clock below is backend-agnostic. */
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(PS3RECOMP_RSX_VULKAN)
 extern "C" int  rsx_d3d12_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_d3d12_backend_present(void);
 extern "C" int  rsx_d3d12_backend_pump_messages(void);
@@ -151,7 +151,11 @@ extern "C" int  rsx_metal_backend_pump_messages(void);
 #  define RSX_BACKEND_NAME    "Metal"
 #else
 extern "C" int  rsx_null_backend_init(uint32_t w, uint32_t h, const char* title);
+#ifdef _WIN32   /* the Windows null backend is a GDI window with no present of its own */
+static void rsx_null_backend_present(void) {}
+#else
 extern "C" void rsx_null_backend_present(void);
+#endif
 extern "C" int  rsx_null_backend_pump_messages(void);
 extern "C" int  rsx_vulkan_backend_init(uint32_t w, uint32_t h, const char* title);
 extern "C" void rsx_vulkan_backend_present(void);
@@ -564,6 +568,7 @@ static void apk_prepare(int* argc, char*** argv)
     setenv("VK_DRAW_BATCH", "1", 0);  /* one submit per batch of draws, not a GPU round trip per draw: ~2x fps */
     setenv("VK_DRAW_BATCH_MAX", "128", 0);   /* smaller batches reach the GPU earlier in the frame: fights 18.5 -> 23 fps */
     setenv("SPU_FLOAT_RZ", "1", 0);   /* SPU code runs in its own round-toward-zero mode: skinning jobs 750 -> 220 us */
+    setenv("PS3_PRIO_START", "1", 0); /* SurMixer's queue key: the new thread runs first, as on lv2 (see the PC build) */
     static char* args[3];
     args[0] = (char*)"hackversus";
     args[1] = (char*)s_apk_eboot.c_str();
@@ -574,10 +579,72 @@ static void apk_prepare(int* argc, char*** argv)
 }
 #endif
 
+#ifdef HV_PC
+/* The PC build (llvm-mingw, Vulkan through SDL2, the same backend and settings as the APK). With no arguments
+ * it looks beside the executable for EBOOT.ELF and the extracted disc in disc/ (PS3_GAME/...). */
+static std::string s_pc_eboot, s_pc_vfs;
+static void pc_prepare(int* argc, char*** argv)
+{
+    char exe[1024];
+    DWORD n = GetModuleFileNameA(NULL, exe, sizeof exe);
+    std::string dir(exe, n);
+    dir = dir.substr(0, dir.find_last_of("\\/"));
+    if (*argc < 2) {
+        s_pc_eboot = dir + "/EBOOT.ELF";
+        s_pc_vfs   = dir + "/disc";
+        static char* args[3];
+        args[0] = (*argv)[0];
+        args[1] = (char*)s_pc_eboot.c_str();
+        args[2] = (char*)s_pc_vfs.c_str();
+        *argc = 3;
+        *argv = args;
+    }
+    if (*argc >= 3) _putenv_s("PS3_VFS_ROOT", (*argv)[2]);
+    /* Saves and the HDD install (~2 GB of DATA.CPK on first run) beside the executable. */
+    const std::string gd = dir + "/data";
+    std::string p = gd;
+    CreateDirectoryA(p.c_str(), NULL);
+    for (const char* seg : { "/dev_hdd0", "/home", "/00000001", "/savedata" }) { p += seg; CreateDirectoryA(p.c_str(), NULL); }
+    CreateDirectoryA((gd + "/dev_hdd0/game").c_str(), NULL);
+    CreateDirectoryA((gd + "/spirv").c_str(), NULL);
+    auto def = [](const char* k, const std::string& v) { if (!getenv(k)) _putenv_s(k, v.c_str()); };
+    def("PS3_GAMEDATA_ROOT", gd);
+    def("PS3_HDD0_ROOT", gd + "/dev_hdd0");
+    def("PS3RECOMP_SPIRV_CACHE", gd + "/spirv");
+    def("HV_PIPELINE_CACHE", gd + "/pipeline.cache");
+    /* Optional overrides, one VAR=value per line, as hv_env.txt on the phone. */
+    if (FILE* f = fopen((dir + "/hv_env.txt").c_str(), "r")) {
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            line[strcspn(line, "\r\n")] = 0;
+            char* eq = strchr(line, '=');
+            if (eq && line[0] != '#') { *eq = 0; _putenv_s(line, eq + 1); printf("[pc] env %s=%s\n", line, eq + 1); }
+        }
+        fclose(f);
+    }
+    def("HV_VULKAN", "1");
+    def("PS3RECOMP_VK_GUEST_PROGRAMS", "1");
+    def("PS3RECOMP_VK_WINDOW", "1");
+    def("PS3RECOMP_VK_FULLSCREEN", "1");   /* full screen at the desktop resolution; F11 / Alt+Enter / Esc for a window */
+    def("PS3_VERBOSE", "0");
+    def("VK_DRAW_BATCH", "1");
+    def("VK_DRAW_BATCH_MAX", "128");
+    def("SPU_FLOAT_RZ", "1");
+    /* SurMixer (CRI's music and voices) hands its event queue key to cellAudioSetNotifyEventQueue right after
+     * creating its thread; on Windows the creator read the key before the new thread wrote it (key 0, the mixer
+     * never notified). PS3_PRIO_START lets a higher-priority new thread run first, as lv2 does. */
+    def("PS3_PRIO_START", "1");
+    def("PS3_LANG", "1");   /* English, as on the phone (the host's Spanish was passed through) */
+}
+#endif
+
 int main(int argc, char** argv)
 {
 #ifdef HV_APK
     apk_prepare(&argc, &argv);
+#endif
+#ifdef HV_PC
+    pc_prepare(&argc, &argv);
 #endif
     if (argc < 2) {
         printf("usage: %s <PPU ELF>\n", argv[0]);
@@ -636,6 +703,9 @@ int main(int argc, char** argv)
     }
 
     ppu_recomp_register();   /* lifted function table -> address map */
+#ifdef _WIN32
+    { extern void ps3_sampler_start(void); ps3_sampler_start(); }   /* PS3_SAMPLE=<ms> (ppu_loader.cpp) */
+#endif
     ps3_load_prx_modules();  /* this game's lifted system PRX, if it has any */
     ppu_hle_init();          /* firmware import NID -> HLE handlers */
     ppu_sysprx_register();   /* boot-critical CRT */

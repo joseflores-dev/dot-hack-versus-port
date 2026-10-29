@@ -267,6 +267,7 @@ static u8 pad_xinput_stick_to_u8(short raw, short deadzone)
  * Arrows = d-pad, Z/X/A/S = cross/circle/square/triangle, Q/W = L1/R1,
  * 1/2 = L2/R2, Enter = START, Tab = SELECT. The left stick mirrors the d-pad
  * so a title that reads the stick instead is playable too. */
+#endif /* PAD_BACKEND_XINPUT -- the keyboard is read on Windows whatever the pad backend */
 #ifdef _WIN32
 static int pad_host_window_focused(void)
 {
@@ -307,6 +308,7 @@ static void pad_poll_keyboard(void)
     u16 btns = 0;
     for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++)
         if (GetAsyncKeyState(map[i].vk) & 0x8000) btns |= map[i].btn;
+    if (GetAsyncKeyState(VK_MENU) & 0x8000) btns &= (u16)~CELL_PAD_CTRL_START;   /* Alt+Enter is the full-screen toggle */
 
     hs->buttons   = btns;
     hs->connected = 1;
@@ -324,6 +326,7 @@ static void pad_poll_keyboard(void)
           fflush(stdout); } }
 }
 #endif
+#if PAD_BACKEND_XINPUT
 
 /* XInputGetState on a slot with nothing plugged in costs about 140 us (2 us on
  * a connected one), and the backend is polled at least once a frame: three

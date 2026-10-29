@@ -37,6 +37,9 @@ uint32_t g_ydkj_real_spurs_ea   = 0;   /* real CellSpurs instance EA (for the ta
 
 #ifdef _WIN32
 #include <windows.h>
+#ifdef __MINGW32__
+#include <pthread.h>   /* winpthreads: the parallel job chain pool below is written against pthreads */
+#endif
 #else
 #include <pthread.h>
 #include "ps3emu/ps3_ftrace.h"

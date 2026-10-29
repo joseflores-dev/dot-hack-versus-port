@@ -50,7 +50,9 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
 option(PS3RECOMP_RSX_VULKAN "Build the Vulkan RSX backend (Linux)" OFF)
 list(FILTER HLE_SOURCES EXCLUDE REGEX "rsx_vulkan_backend\\.c$")
 if(PS3RECOMP_RSX_VULKAN)
-    if(WIN32 OR APPLE)
+    # Windows only through llvm-mingw (the port's PC build): winpthreads covers the backend's pthreads and a
+    # LoadLibrary shim its dlopen. clang-cl/MSVC builds keep D3D12.
+    if(APPLE OR (WIN32 AND NOT MINGW))
         message(FATAL_ERROR "PS3RECOMP_RSX_VULKAN is Linux-only for now")
     endif()
     find_path(PS3RECOMP_VULKAN_INCLUDE_DIR vulkan/vulkan.h)
@@ -135,7 +137,21 @@ if(WIN32)
         ole32       # COM for WASAPI audio
         bcrypt      # BCryptGenRandom for SSL RNG
     )
-else()
+endif()
+if(MINGW)
+    # The mingw build (the port's PC build) shares the Android port's SDL2 pad and audio paths -- the
+    # DualShock 4 mapping and the mixer pacing were tuned there -- instead of XInput and WASAPI.
+    find_package(SDL2 REQUIRED)
+    target_link_libraries(ps3recomp_runtime PUBLIC SDL2::SDL2)
+    target_compile_definitions(ps3recomp_runtime PRIVATE PS3RECOMP_PAD_USE_SDL2 PS3RECOMP_AUDIO_USE_SDL2)
+    # Windows 10 API level (GetCurrentThreadStackLimits and friends); mingw's headers default lower.
+    target_compile_definitions(ps3recomp_runtime PUBLIC _WIN32_WINNT=0x0A00)
+    find_package(Threads REQUIRED)
+    target_link_libraries(ps3recomp_runtime PUBLIC Threads::Threads)
+    # The D3D12 backend is still compiled in (cellGcmSys reaches it on _WIN32); its #pragma comment(lib)
+    # imports are an MSVC convention lld does not read in mingw mode.
+    target_link_libraries(ps3recomp_runtime PUBLIC d3d12 dxgi d3dcompiler dxguid)
+elseif(NOT WIN32)
     # cellPad and cellAudio select their SDL2 backends unconditionally off
     # Windows (see PAD_BACKEND_SDL2 / AUDIO_BACKEND_SDL2), so SDL2 is required
     # here -- docs/BUILDING.md already lists it as the Linux/macOS dependency.
@@ -220,7 +236,7 @@ endif()
 #           the standalone binary as an imported target and fails to load
 #           without it)
 set(PS3RECOMP_MSL_TRANSLATION OFF)
-if(UNIX)
+if(UNIX OR MINGW)
     find_package(glslang CONFIG QUIET)
 
     # spirv-cross's C API. Debian ships it as a shared library and Homebrew as
@@ -336,6 +352,8 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
         # _FORTIFY_SOURCE=2 would turn those calls into __open_2 / __read_chk and
         # slip past the wrappers.
         $<$<BOOL:${ANDROID}>:-U_FORTIFY_SOURCE>
+        # The port's PC build (mingw) targets x86-64-v3: the AVX2 forms of the SPU float helpers.
+        $<$<BOOL:${MINGW}>:-march=x86-64-v3>
     )
     # SSE4.1 (any x86-64 since ~2008): pshufb/blendv for spu_shufb, the
     # hottest SPU op in lifted audio code. Probed rather than assumed: recent

@@ -632,7 +632,12 @@ static uint32_t samp_stack_guest(HANDLE h, const CONTEXT* c)
     const uintptr_t* sp = (const uintptr_t*)c->Rsp;
     for (int i = 0; i < 512; i++) {          /* 4 KB of stack */
         uintptr_t v;
+#ifdef _MSC_VER
         __try { v = sp[i]; } __except (1) { return 0; }
+#else   /* mingw has no __try: ask first (diagnostic sampler only) */
+        if (IsBadReadPtr(sp + i, sizeof *sp)) return 0;
+        v = sp[i];
+#endif
         uint32_t g = samp_lookup(v);
         if (g) return g;
     }
@@ -788,7 +793,7 @@ static DWORD WINAPI samp_thread(LPVOID p)
  * Writing the word leaves memory self-consistent: lwarx, the CAS and the
  * polling reader all see the same thing, so the guest behaves as it would if
  * whatever should have cleared the counter had done so. */
-extern "C" void ppu_resv_break(uint64_t ea);
+static inline void ppu_resv_break(uint64_t ea);   /* below; static, which mingw clang will not merge with extern "C" */
 static DWORD WINAPI poke_thread(LPVOID p)
 {
     const uint32_t ea  = (uint32_t)(uintptr_t)p;

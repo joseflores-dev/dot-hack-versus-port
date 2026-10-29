@@ -756,7 +756,37 @@ static volatile LONG s_gcm_pending = 0;    /* bit0 = vblank, bit1 = flip */
 /* Wakes one guest thread blocked in a semaphore wait, which then pumps (see
  * ppu_gcm_wait_pump). Auto-reset; NULL until the first such wait. */
 static HANDLE s_gcm_pump_ev = NULL;
-static void gcm_pump_wake(void) { if (s_gcm_pump_ev) SetEvent(s_gcm_pump_ev); }
+/* The port's PC build: a host thread of its own delivers the handlers, as on POSIX below (HV_PUMP_THREAD=0
+ * keeps the old way). Without it a .hack//Versus fight ran at 20 fps on a Ryzen: delivery waited for a guest
+ * thread to reach an HLE call, and the main thread pacing on the vsync counter missed every other vblank. */
+static HANDLE s_gcm_thread_ev = NULL;
+static volatile LONG s_gcm_pump_thread_on = -1;
+void ppu_gcm_pump(void);
+static DWORD WINAPI gcm_pump_thread(LPVOID arg)
+{
+    (void)arg;
+    ps3_thread_name("gcm pump");
+    for (;;) {
+        WaitForSingleObject(s_gcm_thread_ev, INFINITE);
+        ppu_gcm_pump();
+    }
+    return 0;
+}
+static void gcm_pump_wake(void)
+{
+    if (s_gcm_pump_thread_on < 0) {
+        const char* e = getenv("HV_PUMP_THREAD");
+        int on = !(e && e[0] == '0');
+        if (InterlockedCompareExchange(&s_gcm_pump_thread_on, on, -1) == -1 && on) {
+            s_gcm_thread_ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+            HANDLE t = s_gcm_thread_ev ? CreateThread(NULL, 1u << 20, gcm_pump_thread, NULL, 0, NULL) : NULL;
+            if (t) { SetThreadPriority(t, THREAD_PRIORITY_ABOVE_NORMAL); CloseHandle(t); }
+            else s_gcm_pump_thread_on = 0;
+        }
+    }
+    if (s_gcm_pump_thread_on > 0 && s_gcm_thread_ev) SetEvent(s_gcm_thread_ev);
+    if (s_gcm_pump_ev) SetEvent(s_gcm_pump_ev);
+}
 #define GCM_PENDING_SET(bits)  (InterlockedOr(&s_gcm_pending, (bits)), gcm_pump_wake())
 #define GCM_PENDING_TAKE()     InterlockedExchange(&s_gcm_pending, 0)
 static volatile LONG s_gcm_pumping = 0;

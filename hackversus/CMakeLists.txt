@@ -215,6 +215,14 @@ add_executable(${PROJECT_NAME}
     ${SPU_SOURCES}
 )
 endif()
+# HV_PC: the Windows build (llvm-mingw), Vulkan through SDL2 like the APK. Data beside the .exe (main.cpp).
+if(MINGW)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE HV_PC=1)
+    find_package(SDL2 REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE SDL2::SDL2)
+    # No libc++/libunwind DLLs to ship beside the .exe.
+    target_link_options(${PROJECT_NAME} PRIVATE -static-libgcc -static-libstdc++ -Wl,--stack,8388608)
+endif()
 
 # The lifted SPU sources use bare #include "spu_context.h". Scope that include
 # directory (and their flags) to those TUs alone: adding it to the whole target
@@ -231,6 +239,8 @@ if(SPU_SOURCES)
     if(NOT MSVC OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         if(ANDROID)   # ARMv8.2: LSE atomics and the newer SIMD forms in the lifted SPU code
             set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;-march=armv8.2-a")
+        elseif(MINGW)   # x86-64-v3 (AVX2, Haswell/Zen and later): the AVX2 forms of the SPU float helpers
+            set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2;-march=x86-64-v3")
         else()
             set_source_files_properties(${SPU_SOURCES} PROPERTIES COMPILE_OPTIONS "-O2")
         endif()
@@ -300,6 +310,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         # runtime's atomics become inline LSE instead of __aarch64_* helper
         # calls (visible in the main thread's profile of a fight).
         $<$<BOOL:${ANDROID}>:-march=armv8.2-a>
+        # The PC build targets x86-64-v3 (AVX2): spu_helpers.h has AVX2 forms of the SPU float ops, and without
+        # them every fa/fm/fma of a lifted SPU program went lane by lane through the scalar exact path.
+        $<$<BOOL:${MINGW}>:-march=x86-64-v3>
     )
 elseif(MSVC)
     target_compile_options(${PROJECT_NAME} PRIVATE

@@ -1231,6 +1231,10 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
     yz_lockstep_block_begin(ctx);          /* release the run token before the OS wait */
     {
         unsigned long long start = GetTickCount64(), next_hb = 2000;
+        /* SPU_CH_WAIT_MS=<ms> (default 10): the longest a channel wait sleeps before it looks again, for
+         * readiness that arrives with no wake (a decrementer event). */
+        static int s_wait_ms = -1;
+        if (s_wait_ms < 0) { const char* e = getenv("SPU_CH_WAIT_MS"); s_wait_ms = e && atoi(e) > 0 ? atoi(e) : 10; }
         while (!spu_ch_ready(ctx, channel)) {
             if (ctx->stop_request) {
                 yz_lockstep_block_end(ctx);
@@ -1239,7 +1243,7 @@ static void spu_ch_wait(spu_context* ctx, uint32_t channel, const char* op)
             AcquireSRWLockExclusive((SRWLOCK*)&ctx->ch_wait_lock);
             if (!spu_ch_ready(ctx, channel))
                 SleepConditionVariableSRW((CONDITION_VARIABLE*)&ctx->ch_wait_cv,
-                                          (SRWLOCK*)&ctx->ch_wait_lock, 10, 0);
+                                          (SRWLOCK*)&ctx->ch_wait_lock, (DWORD)s_wait_ms, 0);
             ReleaseSRWLockExclusive((SRWLOCK*)&ctx->ch_wait_lock);
             unsigned long long waited = GetTickCount64() - start;
             if (waited >= next_hb) {

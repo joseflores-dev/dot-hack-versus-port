@@ -38,7 +38,7 @@
  * with spaces.
  */
 
-#ifndef _WIN32
+#if !defined(_WIN32) || defined(PS3RECOMP_RSX_VULKAN)   /* mingw: the port's PC build */
 
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -59,7 +59,28 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
 
+#ifdef _WIN32
+/* The loader is vulkan-1.dll; the three dl* calls below map onto LoadLibrary. */
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#define RTLD_NOW 0
+#define RTLD_LOCAL 0
+static void* dlopen(const char* n, int f) { (void)f; return (void*)LoadLibraryA(n); }
+static void* dlsym(void* h, const char* n) { return (void*)GetProcAddress((HMODULE)h, n); }
+static int dlclose(void* h) { return FreeLibrary((HMODULE)h) ? 0 : -1; }
+static const char* dlerror(void) { return "LoadLibrary failed"; }
+typedef struct { void* dli_fbase; } Dl_info;
+static int dladdr(const void* a, Dl_info* di)
+{
+    HMODULE m;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)a, &m)) return 0;
+    di->dli_fbase = (void*)m;
+    return 1;
+}
+#else
 #include <dlfcn.h>
+#endif
 #include <pthread.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -268,7 +289,11 @@ static int vk_cull_flip(void)
  * -------------------------------------------------------------------------*/
 static int vk_load_library(void)
 {
+    #ifdef _WIN32
+    static const char* names[] = { "vulkan-1.dll" };
+#else
     static const char* names[] = { "libvulkan.so.1", "libvulkan.so" };
+#endif
     for (size_t i = 0; i < sizeof names / sizeof names[0] && !s_vk.lib; i++)
         s_vk.lib = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
     if (!s_vk.lib) {
@@ -2008,6 +2033,7 @@ static void vk_window_open(const char* title)
                                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                    (int)s_vk.width, (int)s_vk.height, flags);
     s_vk.windowed = 1;          /* so vk_window_drop also shuts SDL video down */
+    if (s_vk.window && (flags & SDL_WINDOW_FULLSCREEN_DESKTOP)) SDL_ShowCursor(SDL_DISABLE);
     if (!s_vk.window) {
         char why[256];
         snprintf(why, sizeof why, "SDL_CreateWindow failed: %s", SDL_GetError());
@@ -4809,7 +4835,19 @@ int rsx_vulkan_backend_pump_messages(void)
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) quit = 1;
-        else if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE) quit = 1;
+        else if (e.type == SDL_KEYDOWN && !e.key.repeat) {
+            /* F11 or Alt+Enter toggles full screen (desktop resolution; the swapchain follows the new size through
+             * the out-of-date path). Esc leaves full screen, and in a window closes it as before. */
+            const int fs = (SDL_GetWindowFlags(s_vk.window) & SDL_WINDOW_FULLSCREEN) != 0;
+            const SDL_Keycode k = e.key.keysym.sym;
+            if (k == SDLK_F11 || (k == SDLK_RETURN && (e.key.keysym.mod & KMOD_ALT))) {
+                SDL_SetWindowFullscreen(s_vk.window, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+                SDL_ShowCursor(fs ? SDL_ENABLE : SDL_DISABLE);
+            } else if (k == SDLK_ESCAPE) {
+                if (fs) { SDL_SetWindowFullscreen(s_vk.window, 0); SDL_ShowCursor(SDL_ENABLE); }
+                else quit = 1;
+            }
+        }
     }
     return quit ? -1 : 0;
 }
@@ -4894,4 +4932,4 @@ int rsx_vulkan_backend_depth_bounds(void)
     return s_vk.eng_active && s_vk.depth_bounds_ok;
 }
 
-#endif /* !_WIN32 */
+#endif /* !_WIN32 || PS3RECOMP_RSX_VULKAN */

@@ -620,6 +620,25 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
         if (room >= 0 && blocks > 64 &&
             (UINT32)room + CELL_AUDIO_BLOCK_SAMPLES / 2 >= s_wasapi_buf_frames) g_audio_underruns++;
 #endif
+#if AUDIO_BACKEND_SDL2
+        /* The port's PC build (SDL over WASAPI): the device takes ~10 ms at a time, two blocks, and filling
+         * that room at once mixed two blocks back to back. .hack//Versus's sound driver writes the block at
+         * the published read index when the notify for the previous one arrives, so the second was still
+         * empty: every other block was silence (rough sound, voices lost). Mix on the block clock instead,
+         * and only run ahead when the device queue is about to run dry. */
+        static long long s_last_mix;
+        if (room >= 0 && audio_backend_queued_samples() >= CELL_AUDIO_BLOCK_SAMPLES * 2) {
+            /* At least ~0.9 of a block period since the previous block: the title's writer gets its turn. */
+            LARGE_INTEGER now; QueryPerformanceCounter(&now);
+            const long long gap = (long long)(qf.QuadPart * CELL_AUDIO_BLOCK_SAMPLES * 9 / 10 / CELL_AUDIO_SAMPLE_RATE);
+            if (now.QuadPart - s_last_mix < gap) {
+                const long long left_us = (gap - (now.QuadPart - s_last_mix)) * 1000000 / qf.QuadPart;
+                if (left_us > 1500) Sleep(1); else SwitchToThread();
+                continue;
+            }
+        }
+        { LARGE_INTEGER now; QueryPerformanceCounter(&now); s_last_mix = now.QuadPart; }
+#endif
         if (room < 0) {
             LARGE_INTEGER now; QueryPerformanceCounter(&now);
             const long long due = q0.QuadPart +
@@ -663,6 +682,9 @@ static unsigned __stdcall audio_mix_thread_func(void* arg)
 #else
                         0u, 10);
 #endif
+                fprintf(stderr, "[audio-rate] empty blocks port0 %llu/%llu port1 %llu/%llu\n",
+                        g_audio_port_empty[0], g_audio_port_blocks[0], g_audio_port_empty[1], g_audio_port_blocks[1]);
+                memset(g_audio_port_empty, 0, sizeof g_audio_port_empty); memset(g_audio_port_blocks, 0, sizeof g_audio_port_blocks);
                 n = z = 0; d0 = g_audio_dropped; u0 = g_audio_underruns; t0 = now; } } }
 
         /* Notify event queues */
@@ -702,6 +724,23 @@ static void* audio_mix_thread_func(void* arg)
         static int legacy = -1;
         if (legacy < 0) legacy = getenv("HV_AUDIO_LEGACY_PACE") != NULL;
         if (!legacy && audio_backend_room() == 0) { usleep(1000); continue; }
+        /* As on Windows: at least ~0.9 of a block period since the previous block while the device queue holds two
+         * or more. .hack//Versus's sound drivers write the block at the published read index when the notify for
+         * the previous one arrives; two blocks mixed back to back (the device taking more than one at a time) left
+         * the second still empty -- the 6-17 % of empty blocks on the voice port. HV_AUDIO_GAP=0 turns it off. */
+        static int gap_on = -1;
+        if (gap_on < 0) { const char* e = getenv("HV_AUDIO_GAP"); gap_on = !(e && e[0] == '0'); }
+        static uint64_t last_mix_ns;
+        if (!legacy && gap_on) {
+            struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+            const uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+            const uint64_t gap_ns = 1000000000ull * CELL_AUDIO_BLOCK_SAMPLES * 9 / 10 / CELL_AUDIO_SAMPLE_RATE;
+            if (audio_backend_queued_samples() >= CELL_AUDIO_BLOCK_SAMPLES * 2 && now_ns - last_mix_ns < gap_ns) {
+                usleep(500);
+                continue;
+            }
+            last_mix_ns = now_ns;
+        }
         const u32 before = audio_backend_queued_samples();
         if (before == 0) dry++;
         audio_mix_one_block();

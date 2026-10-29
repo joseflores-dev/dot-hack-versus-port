@@ -708,6 +708,7 @@ int64_t sys_timer_start(ppu_context* ctx)
 
     t->period_usec = period;
     t->running     = 1;
+    fprintf(stderr, "[timer] start id=%u period=%llu us queue=%d\n", timer_id, (unsigned long long)period, t->event_queue_id);
     t->next_expire = timer_now_us() + period;
 
 #ifdef _WIN32

@@ -44,8 +44,8 @@ extern "C" void ps3_load_prx_modules(void)
 {
 #ifndef _WIN32
     std::signal(SIGUSR2, on_sigusr2);
-    hv_prof_start();   /* HV_PROF=<seconds> */
 #endif
+    hv_prof_start();   /* HV_PROF=<seconds> */
 }
 
 /* ---------------------------------------------------------------------------
@@ -473,5 +473,100 @@ extern "C" void hv_prof_start(void)
     pthread_create(&t, nullptr, prof_thread, (void*)(intptr_t)((delay << 16) | (secs & 0xFFFF)));
     pthread_detach(t);
     std::fprintf(stderr, "[prof] sampling every 1 ms for %ss\n", e);
+}
+#endif
+
+/* ---------------------------------------------------------------------------
+ * HV_PROF=[delay:]seconds on Windows (the PC build): every millisecond each other thread of the process is
+ * suspended and its RIP read. At the end, per thread (with its name), the hottest addresses go to stderr as
+ * "[prof] <tid> <name> +<rva> <samples>"; llvm-symbolizer resolves the RVAs against the unstripped .exe.
+ * -----------------------------------------------------------------------*/
+#ifdef _WIN32
+#include <windows.h>
+#include <tlhelp32.h>
+#include <map>
+#include <string>
+#include <vector>
+#include <algorithm>
+static DWORD WINAPI hv_prof_thread_win(LPVOID arg)
+{
+    const long packed = (long)(intptr_t)arg, secs = packed & 0xFFFF, delay = packed >> 16;
+    Sleep((DWORD)delay * 1000);
+    /* HV_PROF_GO=<file>: start only once that file exists (a script creates it when the fight is on screen). */
+    if (const char* go = getenv("HV_PROF_GO"))
+        while (GetFileAttributesA(go) == INVALID_FILE_ATTRIBUTES) Sleep(100);
+    const uintptr_t base = (uintptr_t)GetModuleHandleA(NULL);
+    const DWORD me = GetCurrentThreadId(), pid = GetCurrentProcessId();
+    std::map<DWORD, std::map<uintptr_t, unsigned>> hist;
+    std::map<DWORD, unsigned> total;
+    std::fprintf(stderr, "[prof] sampling every 1 ms for %lds\n", secs);
+    const ULONGLONG end = GetTickCount64() + (ULONGLONG)secs * 1000;
+    std::vector<std::pair<DWORD, HANDLE>> th;
+    th.reserve(512);
+    struct Samp { DWORD tid; uintptr_t pc; };
+    const size_t kMax = 4u << 20;
+    Samp* samp = (Samp*)malloc(kMax * sizeof(Samp));
+    size_t n_samp = 0;
+    ULONGLONG refresh = 0;
+    while (GetTickCount64() < end) {
+        if (GetTickCount64() >= refresh) {   /* the thread list, once a second */
+            for (auto& t : th) CloseHandle(t.second);
+            th.clear();
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            THREADENTRY32 te; te.dwSize = sizeof te;
+            for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+                if (te.th32OwnerProcessID != pid || te.th32ThreadID == me) continue;
+                HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
+                if (h) th.push_back({te.th32ThreadID, h});
+            }
+            CloseHandle(snap);
+            refresh = GetTickCount64() + 1000;
+        }
+        /* Nothing may allocate while a thread is suspended: it can be holding the heap lock. */
+        for (auto& t : th) {
+            if (n_samp >= kMax) break;
+            if (SuspendThread(t.second) == (DWORD)-1) continue;
+            CONTEXT c; c.ContextFlags = CONTEXT_CONTROL;
+            const BOOL ok = GetThreadContext(t.second, &c);
+            ResumeThread(t.second);
+            if (ok) samp[n_samp++] = { t.first, (uintptr_t)c.Rip };
+        }
+        Sleep(1);
+    }
+    for (size_t i = 0; i < n_samp; i++) { hist[samp[i].tid][samp[i].pc]++; total[samp[i].tid]++; }
+    free(samp);
+    for (auto& t : hist) {
+        if (total[t.first] < 50) continue;
+        unsigned in_exe = 0;
+        for (auto& a : t.second) if (a.first >= base && a.first < base + 0x10000000) in_exe += a.second;
+        std::string name = "?";
+        HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, t.first);
+        PWSTR wn = nullptr;
+        if (h && SUCCEEDED(GetThreadDescription(h, &wn)) && wn) {
+            char buf[128]; WideCharToMultiByte(CP_UTF8, 0, wn, -1, buf, sizeof buf, NULL, NULL); name = buf; LocalFree(wn);
+        }
+        if (h) CloseHandle(h);
+        for (auto& c : name) if (c == ' ') c = '_';
+        std::vector<std::pair<unsigned, uintptr_t>> v;
+        for (auto& a : t.second) v.push_back({a.second, a.first});
+        std::sort(v.rbegin(), v.rend());
+        std::fprintf(stderr, "[prof] thread %lu %s: %u samples, %u%% running in the exe\n", (unsigned long)t.first,
+                     name.c_str(), total[t.first], 100u * in_exe / total[t.first]);
+        for (size_t i = 0; i < v.size() && i < 25; i++) {
+            const uintptr_t pc = v[i].second;
+            if (pc >= base && pc < base + 0x10000000) std::fprintf(stderr, "[prof] %lu %s exe+0x%llx %u\n", (unsigned long)t.first, name.c_str(), (unsigned long long)(pc - base), v[i].first);
+            else std::fprintf(stderr, "[prof] %lu %s abs 0x%llx %u\n", (unsigned long)t.first, name.c_str(), (unsigned long long)pc, v[i].first);
+        }
+    }
+    for (auto& t : th) CloseHandle(t.second);
+    return 0;
+}
+extern "C" void hv_prof_start(void)
+{
+    const char* e = getenv("HV_PROF");
+    if (!e || atoi(e) <= 0) return;
+    const char* colon = strchr(e, ':');
+    const long delay = colon ? atol(e) : 0, secs = colon ? atol(colon + 1) : atol(e);
+    CreateThread(NULL, 0, hv_prof_thread_win, (LPVOID)(intptr_t)((delay << 16) | (secs & 0xFFFF)), 0, NULL);
 }
 #endif
