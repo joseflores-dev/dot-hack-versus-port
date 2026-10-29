@@ -73,6 +73,7 @@ Una `VARIABLE=valor` por línea. Las útiles:
 | `HV_AUTOSKIP=1` | Pulsa ✕ solo hasta pasar la intro (solo tiene sentido sin partida guardada). |
 | `HV_JC_PAR=n` | Hilos para los jobs SPU (3 por defecto). |
 | `HV_AUDIO_LEGACY_PACE=1` | Mezclador de audio original de ps3recomp (por si el nuevo suena peor en tu equipo). |
+| `HV_LOG=0` | Sin registro: no se escribe `log.txt` (por defecto se escribe, pero se vacía en cada arranque y no se acumula). |
 
 ## Rendimiento
 

@@ -52,6 +52,7 @@
 #ifndef _WIN32
 #include <sys/mman.h>   /* mmap: the guest arena, see alloc_guest_vm */
 #include <sys/stat.h>   /* mkdir: the shader cache dir */
+#include <unistd.h>     /* unlink: HV_LOG=0 removes the log */
 #endif
 
 #if defined(__APPLE__)
@@ -491,6 +492,13 @@ static void apk_prepare(int* argc, char*** argv)
             if (eq && line[0] != '#') { *eq = 0; setenv(line, eq + 1, 1); printf("[apk] env %s=%s\n", line, eq + 1); }
         }
         fclose(f);
+    }
+    /* HV_LOG=0 (hv_env.txt): no log at all -- both streams to /dev/null and the file removed. The log is
+     * truncated at every launch anyway, so it never accumulates; this is for whoever wants zero writes. */
+    if (const char* lg = getenv("HV_LOG"); lg && lg[0] == '0') {
+        freopen("/dev/null", "w", stdout);
+        freopen("/dev/null", "w", stderr);
+        unlink(log.c_str());
     }
     s_apk_eboot = dir + "/EBOOT.ELF";
     s_apk_vfs   = dir + "/vfs";
