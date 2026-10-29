@@ -13,6 +13,13 @@ AJ=$TC/android-35/android.jar
 export JAVA_HOME=$(cd $TC/jdk-17* && pwd)
 export PATH="$JAVA_HOME/bin:$PATH"
 CM=$TC/cmake-4.4.5-windows-x86_64/bin/cmake
+# HV_BUILD_DIR (default build-apk), HV_PGO=gen (instrumented, writes a profile) or HV_PGO=use:<file.profdata>.
+BD=${HV_BUILD_DIR:-build-apk}
+PGOF=""
+case "${HV_PGO:-}" in
+    gen)   PGOF="-fprofile-generate" ;;
+    use:*) PGOF="-fprofile-use=$(cygpath -m "${HV_PGO#use:}") -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date -Wno-backend-plugin" ;;
+esac
 OUT=$P/out; B=$P/build-apk-java
 mkdir -p "$OUT"; rm -rf "$B"; mkdir -p "$B/classes" "$B/dex" "$B/res"
 
@@ -20,18 +27,19 @@ mkdir -p "$OUT"; rm -rf "$B"; mkdir -p "$B/classes" "$B/dex" "$B/res"
 IN="$W/game/EBOOT.ELF"; for e in spu_jobs/*.elf; do IN="$IN;$W/$e"; done
 # Always reconfigure (cheap): picks up new jobs in spu_jobs/ for PORT_SPU_INPUTS.
 if true; then
-    $CM -S hackversus -B build-apk -G Ninja -DCMAKE_MAKE_PROGRAM=$TC/ninja.exe \
+    $CM -S hackversus -B $BD -G Ninja -DCMAKE_MAKE_PROGRAM=$TC/ninja.exe \
         -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a \
         -DANDROID_PLATFORM=android-31 -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PREFIX_PATH=$P/sysroot -DCMAKE_FIND_ROOT_PATH=$P/sysroot -DPS3RECOMP_RSX_VULKAN=ON \
         -DPS3RECOMP_DIR=$P/ps3recomp-0.18.0 -DRECOMP_DIR=$P/recomp -DPython3_EXECUTABLE=$P/.venv/Scripts/python.exe \
-        "-DPORT_SPU_INPUTS=$IN" -Dglslang_DIR=$W/sysroot/lib/cmake/glslang -DPS3RECOMP_SPU_MERGE_CHUNKS=ON -DHV_APK=ON > build-apk-configure.log
+        "-DPORT_SPU_INPUTS=$IN" -Dglslang_DIR=$W/sysroot/lib/cmake/glslang -DPS3RECOMP_SPU_MERGE_CHUNKS=ON -DHV_APK=ON \
+        "-DCMAKE_C_FLAGS=$PGOF" "-DCMAKE_CXX_FLAGS=$PGOF" "-DCMAKE_SHARED_LINKER_FLAGS=$PGOF" > $BD-configure.log
 fi
 # Fase 19: el contexto SPU tampoco vive en el LS ni en memoria del juego -> __restrict (el lifter no lo emite).
-sed -i 's/(spu_context\* ctx)/(spu_context* __restrict ctx)/g' build-apk/generated_spu/*/spu_recomp.c build-apk/generated_spu/*/spu_recomp.h
-$CM --build build-apk > build-apk/build.log 2>&1 || { grep -E "error" build-apk/build.log | head -20; exit 1; }
+sed -i 's/(spu_context\* ctx)/(spu_context* __restrict ctx)/g' $BD/generated_spu/*/spu_recomp.c $BD/generated_spu/*/spu_recomp.h
+$CM --build $BD > $BD/build.log 2>&1 || { grep -E "error" $BD/build.log | head -20; exit 1; }
 mkdir -p "$B/lib/arm64-v8a"
-$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-strip -o "$B/lib/arm64-v8a/libmain.so" build-apk/libmain.so
+$NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-strip -o "$B/lib/arm64-v8a/libmain.so" $BD/libmain.so
 cp sysroot/lib/libSDL2.so "$B/lib/arm64-v8a/"
 
 # 2. Java -> dex

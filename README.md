@@ -128,6 +128,16 @@ A file named `hv_env.txt` in the data folder (`Android/data/com.hackversus.port/
 - No online, no real trophies, no user music (all stubs).
 - After a long session the phone heats up and lowers its clocks: normal, not a port bug.
 
+## Roadmap
+
+- **Online, cross-platform Versus (PC vs Android).** The game's online mode uses PSN Matching2 rooms, Signaling to
+  exchange the opponents' addresses and then plain P2P sockets (`sys_net`). Its servers are gone, so the plan is a
+  replacement lobby server (first built into the PC version for play on the same network, later on the internet with
+  NAT hole punching or a relay). Both builds run the same translated game code, so a PC and a phone are two identical
+  PS3s to the game; the open questions are desyncs (both sides must compute every frame exactly alike, and some fast
+  floating-point paths differ between ARM and x86) and the slower device setting the pace.
+- **A steady 30 fps in fights on Android** (profile-guided optimisation is being measured).
+
 ## Building
 
 The whole environment is portable and lives in the project folder; nothing is installed system-wide.

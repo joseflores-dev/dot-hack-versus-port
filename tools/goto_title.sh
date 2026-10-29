@@ -8,11 +8,13 @@ S=adb-R5CT61Z9HZA-breWSf._adb-tls-connect._tcp
 OUT="$1"; shift
 D="$(dirname "$0")"
 TMP="$D/../build-apk/goto_tmp.png"
+# Datos de la app en modo ISO (antes /sdcard/PS3).
+A=/sdcard/Android/data/com.hackversus.port/files/PS3
 # Sin partida guardada, el salto automático (✕ cada 1,5 s) atraviesa la intro hasta los monos. CON partida el juego
 # llega solo al título y esas ✕ entrarían a STORY MODE (el hub ALTIMIT): no activarlo.
-if adb -s $S shell "ls /sdcard/PS3/dev_hdd0/home/00000001/savedata/BLJS93008-HACK_VERSUS/VERSUS.S" 2>/dev/null | grep -q VERSUS.S; then ENV=""; else ENV="HV_AUTOSKIP=1\n"; fi
+if adb -s $S shell "ls $A/dev_hdd0/home/00000001/savedata/BLJS93008-HACK_VERSUS/VERSUS.S" 2>/dev/null | grep -q VERSUS.S; then ENV=""; else ENV="HV_AUTOSKIP=1\n"; fi
 for kv in "$@"; do ENV="$ENV$kv\n"; done
-adb -s $S shell "printf '$ENV' > /sdcard/PS3/hv_env.txt; am force-stop com.hackversus.port; am start -n com.hackversus.port/.HackVersusActivity" >/dev/null
+adb -s $S shell "printf '$ENV' > $A/hv_env.txt; am force-stop com.hackversus.port; am start -n com.hackversus.port/.SetupActivity" >/dev/null
 sleep 12
 for i in $(seq 1 60); do
     adb -s $S exec-out screencap -p > "$TMP"

@@ -126,6 +126,17 @@ Archivo `hv_env.txt` en la carpeta de datos (`Android/data/com.hackversus.port/f
 - Sin online, sin trofeos reales, sin música del usuario (todo son stubs).
 - Tras una sesión larga el teléfono se calienta y baja de frecuencia: es normal, no es un fallo del port.
 
+## Pendiente
+
+- **Versus online multiplataforma (PC contra Android).** El modo online del juego usa salas de PSN Matching2,
+  Signaling para intercambiar las direcciones de los rivales y luego sockets P2P normales (`sys_net`). Sus servidores ya
+  no existen, así que el plan es un servidor de salas que los reemplace (primero dentro de la versión de PC, para jugar
+  en la misma red; después por internet, con hole punching de NAT o un relay). Las dos versiones corren el mismo código
+  traducido del juego, así que para el juego un PC y un teléfono son dos PS3 idénticas; lo que queda por resolver son
+  las desincronizaciones (los dos lados deben calcular cada cuadro exactamente igual, y algunos caminos rápidos de coma
+  flotante difieren entre ARM y x86) y que el equipo más lento marque el ritmo.
+- **30 fps estables en las peleas en Android** (se está midiendo la optimización guiada por perfil, PGO).
+
 ## Cómo se construye
 
 Todo el entorno es portátil y vive en la carpeta del proyecto; nada se instala en el sistema.

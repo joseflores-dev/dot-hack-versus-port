@@ -461,6 +461,10 @@ static int run_guest(uint32_t entry, uint32_t stack_top) { return ppu_run(entry,
  * files dir. The app opens straight into the game, so the runner's settings that the adb runs pass as
  * environment variables become defaults here. */
 extern "C" void hv_vpad_init(void);
+extern "C" int  __llvm_profile_write_file(void) __attribute__((weak));          /* only in a -fprofile-generate build */
+extern "C" void __llvm_profile_set_filename(const char*) __attribute__((weak));
+#include <thread>
+#include <chrono>
 static std::string s_apk_eboot, s_apk_vfs, s_apk_iso_root;
 static void apk_prepare(int* argc, char*** argv)
 {
@@ -576,6 +580,14 @@ static void apk_prepare(int* argc, char*** argv)
     *argc = 3;
     *argv = args;
     hv_vpad_init();   /* stubs.cpp: the on-screen pad's SDL virtual joystick */
+    /* PGO (tools/build_apk.sh with HV_PGO=gen): Android kills the app rather than letting it exit, so the profile is
+     * written every 15 s to <files>/hackversus.profraw (the counters accumulate; each write has them all). */
+    if (__llvm_profile_write_file && files) {
+        static std::string prof = std::string(files) + "/hackversus.profraw";
+        __llvm_profile_set_filename(prof.c_str());
+        std::thread([] { for (;;) { std::this_thread::sleep_for(std::chrono::seconds(15)); __llvm_profile_write_file(); } }).detach();
+        printf("[apk] PGO profile -> %s every 15 s\n", prof.c_str());
+    }
 }
 #endif
 
