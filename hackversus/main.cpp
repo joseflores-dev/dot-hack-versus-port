@@ -578,6 +578,10 @@ static void apk_prepare(int* argc, char*** argv)
      * exception. A fight's textures do not change; the hashes were ~16 % of the RSX thread (27.6 -> 29.1 fps). */
     setenv("HV_TEXHASH_FULL_EVERY", "64", 0);
     setenv("HV_TEXHASH_SMALL", "0", 0);
+    /* The sound driver's SPU threads (Bandai Namco's nus: voices and hits) at audio priority, as Android gives its
+     * own audio threads: left at the default they lost the CPU to the game's threads and missed ~10 % of their
+     * 5.3 ms blocks (heard as rough voices); at -16, 2.5 %, with no change in fps. */
+    setenv("HV_SPU_NICE", "-16", 0);
     static char* args[3];
     args[0] = (char*)"hackversus";
     args[1] = (char*)s_apk_eboot.c_str();
