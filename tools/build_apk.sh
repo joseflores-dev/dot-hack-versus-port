@@ -28,6 +28,8 @@ OUT=$P/out; B=$P/build-apk-java
 mkdir -p "$OUT"; rm -rf "$B"; mkdir -p "$B/classes" "$B/dex" "$B/res"
 
 # 1. libmain.so
+# Ganchos del port en el código generado (mods de personajes): recomp/ está fuera del repo.
+python -I tools/apply_recomp_hooks.py recomp || exit 1
 IN="$W/game/EBOOT.ELF"; for e in spu_jobs/*.elf; do IN="$IN;$W/$e"; done
 # Always reconfigure (cheap): picks up new jobs in spu_jobs/ for PORT_SPU_INPUTS.
 if true; then

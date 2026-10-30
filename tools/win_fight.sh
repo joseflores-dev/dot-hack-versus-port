@@ -5,6 +5,7 @@
 cd "$(dirname "$0")/.."
 W=$(pwd -W)
 rm -f out-win/prof.go
-env "$@" HV_PROF_GO="$W/out-win/prof.go" out-win/hackversus.exe "$W/game/EBOOT.ELF" "$W/disc" > out-win/run.log 2> out-win/run.err &
-powershell -ExecutionPolicy Bypass -File "$W/tools/win_fight.ps1" -Attach -FightSecs ${FIGHT_SECS:-25}
+# Mientras trabajamos: sin logos de arranque (HV_INTRO=0,17: carga y siguiente escena); HV_INTRO=... lo reemplaza.
+env HV_INTRO=0,17 "$@" HV_PROF_GO="$W/out-win/prof.go" out-win/hackversus.exe "$W/game/EBOOT.ELF" "$W/disc" > out-win/run.log 2> out-win/run.err &
+powershell -ExecutionPolicy Bypass -File "$W/tools/win_fight.ps1" -Attach -FightSecs ${FIGHT_SECS:-25} -Right ${HV_RIGHT:-0} -Scan ${HV_SCAN:-0} -Burst ${HV_BURST:-0} ${HV_COSTUME_PROBE:+-CostumeProbe} ${HV_KEYS:+-Keys "$HV_KEYS"} ${HV_PREKEYS:+-PreKeys "$HV_PREKEYS"}
 wait

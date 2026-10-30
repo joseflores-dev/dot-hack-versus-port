@@ -13,6 +13,10 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <initializer_list>
+#include <thread>
+#include <chrono>
 
 #include "ps3emu/ps3types.h"
 #include "ps3emu/error_codes.h"
@@ -107,6 +111,349 @@ extern "C" void ps3_load_prx_modules(void)
  *   // Replace a function call with a direct return
  *   ps3::patches::force_return(0x009A1000, 0);  // return 0
  */
+
+/* ---------------------------------------------------------------------------
+ * Character model mods. func_0004BB04 builds "data/chr/<code>chrpsn.xfbin" with sprintf (the code -- 1kit01, ...
+ * -- from func_0004293C); recomp/ppu_recomp_001.cpp calls hv_chr_path_hook right after it with the guest buffer
+ * and the player object, whose byte +0x924 is the colour picked in the character menu (0 = 1st, 1 = 2nd).
+ * The file name must stay as it is (the title files the loaded resources under it; asking for another entry
+ * loaded fine and drew nothing), so a mod changes where the data comes from instead: the title keeps the
+ * DATA.CPK index in guest memory, and the entry's row (FileSize, ExtractSize, FileOffset: 16 bytes) is pointed
+ * at the mod's data -- appended to the CPK by the installer -- while that player's model is read, and back to
+ * the original for any other.
+ *   HV_MODS=<file>: lines "swap <code> <offset hex> <value> <row position in the CPK> <original row hex>
+ *                   <mod row hex>" (written by the installer, descargas/mods-azurekite/install_pc.sh).
+ *   HV_CHRLOG=1: log each model file asked for and what the mods did.
+ * -----------------------------------------------------------------------*/
+extern uint8_t* vm_base;
+extern "C" void (*g_hv_fs_read_hook)(int fd, long long pos, uint32_t buf, size_t n);
+static int replace_rows(const uint8_t* from, const uint8_t* to);
+namespace {
+struct ChrSwap { char code[16]; unsigned off, val; long long rowpos; uint8_t orig[16], repl[16], orig_abs[16], repl_abs[16]; uint32_t guest; int on; uint32_t gaddr; int colour;
+                 long long subst_at, subst_len; uint8_t* subst; int slot; };
+ChrSwap s_swaps[16];
+int s_nswaps = -1;
+int s_chrlog = -1;
+
+int hexbytes(const char* h, uint8_t* out)
+{
+    for (int i = 0; i < 16; i++) { unsigned v; if (std::sscanf(h + 2 * i, "%2x", &v) != 1) return 0; out[i] = (uint8_t)v; }
+    return 1;
+}
+
+void watch_setup();
+
+void load_mods()
+{
+    if (s_nswaps >= 0) return;
+    s_nswaps = 0;
+    s_chrlog = std::getenv("HV_CHRLOG") != nullptr;
+    /* HV_MODS, or data/hv_mods.txt next to the PC build, or hv_mods.txt in the APK's data folder */
+    const char* path = std::getenv("HV_MODS");
+    static char def[600];
+    if (!path || !*path) {
+        const char* hdd = std::getenv("PS3_HDD0_ROOT");   /* <data>/dev_hdd0 (PC) or <files>/PS3/dev_hdd0 (APK) */
+        if (hdd && *hdd) {
+            std::snprintf(def, sizeof def, "%s/../hv_mods.txt", hdd);
+            path = def;
+        } else {
+            path = "data/hv_mods.txt";
+        }
+    }
+    FILE* f = std::fopen(path, "r");
+    if (!f) return;
+    char dir[600];
+    std::snprintf(dir, sizeof dir, "%s", path);
+    { char* sl = std::strrchr(dir, '/'); char* bs = std::strrchr(dir, 92); if (bs > sl) sl = bs; if (sl) sl[1] = 0; else dir[0] = 0; }
+    char line[512];
+    while (s_nswaps < 16 && std::fgets(line, sizeof line, f)) {
+        ChrSwap w = {};
+        /* "subst <code> <colour index> <carousel slot> <offset hex> <length> <file>": for the character at that slot of
+         * the character menu (widget +0x8C: Sora 0, Sakuya 1, Haseo 2, Kite 3, BlackRose 4, Tsukasa 5, Ovan 6, Tokio
+         * 7), the colour selector gets that one more colour, and while it shows it,
+         * reads of the entry's bytes in the CPK [offset, offset+length) are served from <file> instead (same size
+         * and format as the entry: make_chunked.py) -- CriFs and the index are not touched. */
+        char sp[400];
+        if (std::sscanf(line, "subst %15s %u %d %llx %lld %399[^\r\n]", w.code, &w.val, &w.slot, &w.subst_at, &w.subst_len, sp) == 6) {
+            char full[1000];   /* relative to the mods file */
+            if (sp[0] == '/' || sp[0] == 92 || (sp[0] && sp[1] == ':')) std::snprintf(full, sizeof full, "%s", sp);
+            else std::snprintf(full, sizeof full, "%s%s", dir, sp);
+            FILE* b = std::fopen(full, "rb");
+            if (b) {
+                w.subst = (uint8_t*)std::malloc((size_t)w.subst_len);
+                if (w.subst && std::fread(w.subst, 1, (size_t)w.subst_len, b) == (size_t)w.subst_len) { w.colour = 2; s_swaps[s_nswaps++] = w; }
+                std::fclose(b);
+            }
+            if (!(s_nswaps && s_swaps[s_nswaps - 1].subst)) std::fprintf(stderr, "[mods] cannot read %s\n", sp);
+            continue;
+        }
+        char o[64], r[64];
+        unsigned toc = 0x800;
+        /* "swapg": the choice is a byte of the title's own battle setup (global address), watched from the menu
+         * on so the row already points at the mod when the model is loaded (that happens before the player
+         * object -- and hv_chr_path_hook -- exists) */
+        if ((std::sscanf(line, "swap %15s %x %u %lld %63s %63s %u", w.code, &w.off, &w.val, &w.rowpos, o, r, &toc) >= 6 ||
+             std::sscanf(line, "swapg %15s %x %u %lld %63s %63s %u", w.code, &w.gaddr, &w.val, &w.rowpos, o, r, &toc) >= 6 ||
+             (std::sscanf(line, "swapc %15s %u %lld %63s %63s %u", w.code, &w.val, &w.rowpos, o, r, &toc) >= 5 && (w.colour = 1))) &&
+            hexbytes(o, w.orig) && hexbytes(r, w.repl)) {
+            /* CriFs' own file-info entries hold the same row with the offset made absolute (+ the TOC offset) */
+            std::memcpy(w.orig_abs, w.orig, 16); std::memcpy(w.repl_abs, w.repl, 16);
+            uint8_t* rows[2] = { w.orig_abs, w.repl_abs };
+            for (uint8_t* row : rows) {
+                uint64_t v = 0;
+                for (int k = 8; k < 16; k++) v = (v << 8) | row[k];
+                v += toc;
+                for (int k = 15; k >= 8; k--) { row[k] = (uint8_t)v; v >>= 8; }
+            }
+            s_swaps[s_nswaps++] = w;
+        }
+    }
+    std::fclose(f);
+    for (int i = 0; i < s_nswaps; i++) if (s_swaps[i].gaddr) { std::thread(watch_setup).detach(); break; }
+    std::fprintf(stderr, "[mods] %d model swap(s) from %s\n", s_nswaps, path);
+}
+
+/* Every read into guest memory: the read that brings in a mod's index row tells where the title keeps it. */
+uint64_t row_off(const uint8_t* r) { uint64_t v = 0; for (int k = 8; k < 16; k++) v = (v << 8) | r[k]; return v; }
+uint32_t row_size(const uint8_t* r) { return ((uint32_t)r[0] << 24) | ((uint32_t)r[1] << 16) | ((uint32_t)r[2] << 8) | r[3]; }
+
+void fs_read_hook(int fd, long long pos, uint32_t buf, size_t n)
+{
+    (void)fd;
+    load_mods();   /* the first game read: main() has set PS3_HDD0_ROOT by now */
+    if (s_nswaps <= 0) return;
+    for (int i = 0; i < s_nswaps; i++) {
+        const ChrSwap& w = s_swaps[i];
+        if (!w.subst || !w.on) continue;
+        const long long a = pos > w.subst_at ? pos : w.subst_at;
+        const long long e = (pos + (long long)n) < (w.subst_at + w.subst_len) ? (pos + (long long)n) : (w.subst_at + w.subst_len);
+        if (a >= e) continue;
+        std::memcpy(vm_base + buf + (a - pos), w.subst + (a - w.subst_at), (size_t)(e - a));
+        if (s_chrlog) std::fprintf(stderr, "[mods] %s: served +%lld, %lld bytes from the mod\n", w.code, a - w.subst_at, e - a);
+    }
+    if (s_chrlog && (std::getenv("HV_READLOG") || pos >= 0x80000000ll || n >= (1u << 20)))
+        std::fprintf(stderr, "[mods] read fd %d at 0x%llX, %zu bytes -> guest 0x%08X\n", fd, pos, n, buf);
+    if (s_chrlog)   /* reads of a mod's entry, original or replacement data */
+        for (int i = 0; i < s_nswaps; i++)
+            for (int m = 0; m < 2; m++) {
+                const uint8_t* r = m ? s_swaps[i].repl_abs : s_swaps[i].orig_abs;
+                const long long o = (long long)row_off(r), e = o + row_size(r);
+                if (pos < e && pos + (long long)n > o)
+                    std::fprintf(stderr, "[mods] read %s %s data: +%lld, %zu bytes\n", s_swaps[i].code, m ? "MOD" : "original", pos - o, n);
+            }
+    for (int i = 0; i < s_nswaps; i++) {
+        ChrSwap& w = s_swaps[i];
+        if (w.colour || w.guest || w.rowpos < pos || w.rowpos + 16 > pos + (long long)n) continue;
+        const uint32_t at = buf + (uint32_t)(w.rowpos - pos);
+        if (std::memcmp(vm_base + at, w.orig, 16) == 0) {
+            w.guest = at;
+            std::fprintf(stderr, "[mods] %s: index row at guest 0x%08X\n", w.code, at);
+        }
+    }
+}
+
+#ifdef _WIN32
+}
+#include <windows.h>
+namespace {
+/* HV_MEMSNAP=<dir>: when <dir>/snap.req appears, dump the guest memory in use to <dir>/snap_<n>.bin (records:
+ * u32 guest address, u32 length, bytes) and delete the request -- to find a variable by comparing snapshots. */
+DWORD WINAPI memsnap_thread(LPVOID)
+{
+    const char* dir = std::getenv("HV_MEMSNAP");
+    char req[600], out[600];
+    std::snprintf(req, sizeof req, "%s/snap.req", dir);
+    for (int n = 0;;) {
+        Sleep(200);
+        FILE* r = std::fopen(req, "rb");
+        if (!r) continue;
+        std::fclose(r);
+        std::snprintf(out, sizeof out, "%s/snap_%d.bin", dir, n++);
+        FILE* f = std::fopen(out, "wb");
+        MEMORY_BASIC_INFORMATION mi;
+        size_t total = 0;
+        for (uint8_t* p = vm_base; f && p < vm_base + 0x100000000ull && VirtualQuery(p, &mi, sizeof mi); p = (uint8_t*)mi.BaseAddress + mi.RegionSize) {
+            if (mi.State != MEM_COMMIT || !(mi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE))) continue;
+            const uint32_t g = (uint32_t)((uint8_t*)mi.BaseAddress - vm_base), len = (uint32_t)mi.RegionSize;
+            std::fwrite(&g, 4, 1, f); std::fwrite(&len, 4, 1, f); std::fwrite(mi.BaseAddress, 1, len, f);
+            total += len;
+        }
+        if (f) std::fclose(f);
+        std::remove(req);
+        std::fprintf(stderr, "[memsnap] %s: %zu MB\n", out, total >> 20);
+    }
+    return 0;
+}
+#endif
+/* The "swapg" mods: point the index row at the mod while the watched setup byte has the mod's value. */
+void watch_setup()
+{
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (!vm_base) continue;
+        for (int i = 0; i < s_nswaps; i++) {
+            ChrSwap& w = s_swaps[i];
+            if (!w.gaddr) continue;
+            const int mod = vm_base[w.gaddr] == w.val;
+            if (mod == w.on) continue;
+            const int n = replace_rows(mod ? w.orig : w.repl, mod ? w.repl : w.orig) +
+                          replace_rows(mod ? w.orig_abs : w.repl_abs, mod ? w.repl_abs : w.orig_abs);
+            w.on = mod;
+            std::fprintf(stderr, "[mods] %s: %s from the setup byte at 0x%08X (%d copies of the index row)\n",
+                         w.code, mod ? "mod" : "original", w.gaddr, n);
+        }
+    }
+}
+struct Init { Init() {
+    g_hv_fs_read_hook = fs_read_hook;   /* the mods file is read on the first game read (load_mods) */
+#ifdef _WIN32
+    if (std::getenv("HV_MEMSNAP")) CreateThread(nullptr, 0, memsnap_thread, nullptr, 0, nullptr);
+#endif
+} } s_init;
+}
+
+#ifdef _WIN32
+#include <windows.h>
+/* HV_MODSCAN=<FileSize hex>,<ExtractSize hex>: where else the title keeps an index row (CriFs' own tables). */
+static void mods_scan()
+{
+    static int done = 0;
+    const char* e = std::getenv("HV_MODSCAN");
+    if (done || !e) return;
+    done = 1;
+    unsigned a = 0, b = 0;
+    if (std::sscanf(e, "%x,%x", &a, &b) != 2) return;
+    uint8_t pa[4] = { (uint8_t)(a >> 24), (uint8_t)(a >> 16), (uint8_t)(a >> 8), (uint8_t)a };
+    uint8_t pb[4] = { (uint8_t)(b >> 24), (uint8_t)(b >> 16), (uint8_t)(b >> 8), (uint8_t)b };
+    MEMORY_BASIC_INFORMATION mi;
+    for (uint8_t* p = vm_base; p < vm_base + 0x100000000ull && VirtualQuery(p, &mi, sizeof mi); p = (uint8_t*)mi.BaseAddress + mi.RegionSize) {
+        if (mi.State != MEM_COMMIT) continue;
+        uint8_t* r = (uint8_t*)mi.BaseAddress; size_t n = mi.RegionSize;
+        for (size_t i = 0; i + 4 <= n; i++) {
+            if (std::memcmp(r + i, pa, 4)) continue;
+            for (int d = -48; d <= 48; d++) {
+                if ((long long)i + d < 0 || i + d + 4 > n || std::memcmp(r + i + d, pb, 4)) continue;
+                const uint32_t g = (uint32_t)(r + i - vm_base);
+                std::fprintf(stderr, "[modscan] FileSize at 0x%08X, ExtractSize at %+d:", g, d);
+                for (int k = -16; k < 32; k++) std::fprintf(stderr, " %02X", r[i + k]);
+                std::fprintf(stderr, "\n");
+            }
+        }
+    }
+    std::fprintf(stderr, "[modscan] done\n");
+}
+#else
+static void mods_scan() {}
+#endif
+
+#ifndef _WIN32
+#include <sys/mman.h>
+#endif
+/* Replace every copy of a 16-byte row in the guest memory actually in use (the raw index and CriFs' tables). */
+static int replace_rows(const uint8_t* from, const uint8_t* to)
+{
+    int n = 0;
+    auto scan = [&](uint8_t* r, size_t len) {
+        for (size_t i = 0; i + 16 <= len; i++)
+            if (r[i] == from[0] && std::memcmp(r + i, from, 16) == 0) { std::memcpy(r + i, to, 16); n++; i += 15; }
+    };
+#ifdef _WIN32
+    MEMORY_BASIC_INFORMATION mi;
+    for (uint8_t* p = vm_base; p < vm_base + 0x100000000ull && VirtualQuery(p, &mi, sizeof mi); p = (uint8_t*)mi.BaseAddress + mi.RegionSize)
+        if (mi.State == MEM_COMMIT && (mi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)))
+            scan((uint8_t*)mi.BaseAddress, mi.RegionSize);
+#else
+    /* the guest space is one mapping; only the pages the title touched are resident: walk them with mincore */
+    const size_t pg = 4096;
+    static unsigned char* vec = nullptr;
+    const size_t span = 0x100000000ull;
+    if (!vec) vec = (unsigned char*)std::malloc(span / pg);
+    if (vec && mincore(vm_base, span, vec) == 0)
+        for (size_t i = 0; i < span / pg; i++) if (vec[i] & 1) scan(vm_base + i * pg, pg);
+#endif
+    return n;
+}
+
+/* The character menu's colour selector (func_002865F0 draws "%02d/%02d" from the setting object's +0x1C current
+ * index and +0x20 highest index). HV_CHRLOG=1 logs the object whenever it changes. */
+extern "C" void hv_color_hook(uint32_t setting, uint32_t widget)
+{
+    load_mods();
+    /* "swapc <code> <colour index>": the selector gets one more colour (highest index +0x20 raised to it), and
+     * while it shows that colour the code's index row points at the mod -- the menu runs before the battle
+     * loads its models, so the model is read from the mod's data. */
+    const uint8_t* sl = vm_base + widget + 0x8C;
+    const int slot = (int)(((uint32_t)sl[0] << 24) | (sl[1] << 16) | (sl[2] << 8) | sl[3]);
+    for (int i = 0; i < s_nswaps; i++) {
+        ChrSwap& w = s_swaps[i];
+        if (!w.colour) continue;
+        if (w.subst && slot != w.slot && w.guest != setting) continue;   /* another character's selector */
+        for (uint32_t f : { 0x20u, 0x28u }) {   /* +0x20 the "/NN" shown, +0x28 the bound the arrows wrap at */
+            uint8_t* hi = vm_base + setting + f;
+            const uint32_t cur_hi = ((uint32_t)hi[0] << 24) | (hi[1] << 16) | (hi[2] << 8) | hi[3];
+            if (cur_hi < w.val) { hi[0] = hi[1] = hi[2] = 0; hi[3] = (uint8_t)w.val; }
+        }
+        const uint8_t* c = vm_base + setting + 0x1C;
+        const int shows = (((uint32_t)c[0] << 24) | (c[1] << 16) | (c[2] << 8) | c[3]) == w.val;
+        /* each player has its own selector object: only the one that picked the colour can take it back */
+        if (!shows && w.guest != setting) continue;
+        const int mod = shows;
+        if (mod) w.guest = setting;
+        if (mod != w.on) {
+            const int n = w.subst ? 0 : replace_rows(mod ? w.orig : w.repl, mod ? w.repl : w.orig) +
+                          replace_rows(mod ? w.orig_abs : w.repl_abs, mod ? w.repl_abs : w.orig_abs);
+            w.on = mod;
+            std::fprintf(stderr, "[mods] %s: %s (colour %u in the selector, %d copies of the index row)\n", w.code, mod ? "mod" : "original", w.val + 1, n);
+        }
+    }
+    static uint8_t last[0x40];
+    if (s_chrlog && std::memcmp(last, vm_base + setting, 0x40)) {
+        std::memcpy(last, vm_base + setting, 0x40);
+        std::fprintf(stderr, "[color] setting 0x%08X widget 0x%08X:", setting, widget);
+        for (int k = 0; k < 0x40; k++) std::fprintf(stderr, "%s%02X", k % 4 ? "" : " ", vm_base[setting + k]);
+        std::fprintf(stderr, "\n");
+        const uint32_t up = (vm_base[setting + 4] << 24) | (vm_base[setting + 5] << 16) | (vm_base[setting + 6] << 8) | vm_base[setting + 7];
+        std::fprintf(stderr, "[color]   widget:");
+        for (int k = 0; k < 0x200; k += 4) std::fprintf(stderr, " %08X", (vm_base[widget + k] << 24) | (vm_base[widget + k + 1] << 16) | (vm_base[widget + k + 2] << 8) | vm_base[widget + k + 3]);
+        std::fprintf(stderr, "\n");
+        std::fprintf(stderr, "[color]   +4 -> 0x%08X:", up);
+        for (int k = 0; k < 0x80; k++) std::fprintf(stderr, "%s%02X", k % 4 ? "" : " ", vm_base[up + k]);
+        std::fprintf(stderr, "\n");
+    }
+}
+
+extern "C" void hv_chr_path_hook(uint32_t buf, uint32_t player)
+{
+    load_mods();
+    mods_scan();
+    const char* s = (const char*)(vm_base + buf);
+    if (s_chrlog)
+        std::fprintf(stderr, "[chr] %s player=0x%08X +924=%u +925=%u\n", s, player,
+                     vm_base[player + 0x924], vm_base[player + 0x925]);
+    const char* at = std::strstr(s, "data/chr/");
+    if (!at) return;
+    at += 9;
+    /* A "subst" colour has no tint of its own (the title's tables stop at its last colour: grey): the mod brings its
+     * own textures, so the fighter takes colour 1's tint. */
+    for (int i = 0; i < s_nswaps; i++) {
+        const ChrSwap& w = s_swaps[i];
+        if (w.subst && std::strncmp(at, w.code, std::strlen(w.code)) == 0 && vm_base[player + 0x924] == w.val) {
+            vm_base[player + 0x924] = 0;
+            if (s_chrlog) std::fprintf(stderr, "[chr]   %s: colour %u -> tint of colour 1\n", w.code, w.val + 1);
+        }
+    }
+    for (int i = 0; i < s_nswaps; i++) {
+        ChrSwap& w = s_swaps[i];
+        if (w.gaddr || w.colour || std::strncmp(at, w.code, std::strlen(w.code)) != 0) continue;
+        const int mod = vm_base[player + w.off] == w.val;
+        int n = 0;
+        if (mod != w.on) {
+            n = replace_rows(mod ? w.orig : w.repl, mod ? w.repl : w.orig) + replace_rows(mod ? w.orig_abs : w.repl_abs, mod ? w.repl_abs : w.orig_abs);
+            w.on = mod;
+        }
+        if (s_chrlog) std::fprintf(stderr, "[chr]   %s: %s (%d copies of the index row changed)\n", w.code, mod ? "mod" : "original", n);
+    }
+}
 
 /* ---------------------------------------------------------------------------
  * Android on-screen pad (APK build)

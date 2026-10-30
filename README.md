@@ -1,152 +1,152 @@
 # .hack//Versus — native port for Android and Windows
 
-*English. [Versión en español](README.es.md).*
+*English · [Español](README.es.md)*
+
+A **native** port of the PS3 fighting game .hack//Versus to **Android (ARM64)** and **Windows (x64)**. It is not an
+emulator: the game's code was translated to C++ by static recompilation with
+[ps3recomp](https://github.com/sp00nznet/ps3recomp) and compiled for each platform; the PS3 graphics chip is
+reproduced on Vulkan.
 
 > [!IMPORTANT]
-> No game files are included. You need your own legally obtained copy of **.hack//Versus** (PlayStation 3,
-> BLJS93008) as a disc image (`.iso`). A fan project, not affiliated with CyberConnect2, Bandai Namco or Sony.
-
-> [!NOTE]
-> Work in progress. Fights, menus, saving and controllers work; Story Mode and the online modes have not been played
-> through. Bug reports, fixes and improvements are very welcome: open an issue or a pull request.
-
-A **native** port (no emulator) of the fighting game .hack//Versus to **Android ARM64** and **Windows x64**, made by
-static recompilation with [ps3recomp](https://github.com/sp00nznet/ps3recomp): the game's PPU code is translated to
-C++ and compiled for the target, its SPU programs are translated the same way, and the RSX GPU is emulated on Vulkan.
-It is not an emulator. Tested on a Samsung Galaxy S22 Ultra (Snapdragon 8 Gen 1, Adreno 730, Android 16) and on a
-Windows 10 PC (Ryzen 7 5700X3D, GeForce RTX 3050).
+> No game files are included. You need your own legally obtained copy of **.hack//Versus** (PS3, BLJS93008) as a
+> disc image (`.iso`). A fan project, not affiliated with CyberConnect2, Bandai Namco or Sony.
 
 ![Fight: Sora vs Sora in Aura's Garden](docs/pelea.png)
 
-## Features
+## Contents
 
-- The game runs as a native app: install the APK, pick your ISO, play. No PS3 firmware, nothing to extract.
-- Reads the disc image in place (its own ISO9660 reader): no copy, no storage permission.
-- Bluetooth controllers (DualShock 4 and compatibles) with the PS3 mapping, L3/R3 included; an on-screen touch pad
-  that can be hidden (**PAD** button).
-- Saving, sound (music, voices and hits), intro trimmed to the logos, full-screen rendering.
-- Performance: menus at 30 fps (the game's cap); fights at 25–27 fps on the phone with its battery saver on, and a
-  steady 30 fps on the PC.
-- Windows: full screen at the desktop resolution (F11 or Alt+Enter toggles a window), controllers through SDL and the
-  keyboard as a fallback.
+- [Status](#status)
+- [Download and play](#download-and-play)
+- [Controls](#controls)
+- [Options](#options-hv_envtxt)
+- [Character mods](#character-mods-experimental)
+- [Known issues](#known-issues)
+- [Building from source](#building-from-source)
+- [Credits and license](#credits-and-license)
 
-![Title](docs/titulo.png)
+## Status
 
-## Requirements
+| | Android | Windows |
+|---|---|---|
+| Fights | Steady 30 fps (the game's cap), battery saver on | Steady 30 fps |
+| Menus, saving, sound | Yes | Yes |
+| Controllers | Bluetooth (DualShock 4 and compatibles) + on-screen touch pad | Any SDL controller + keyboard |
+| Story Mode, online | Not played through / no online | Same |
 
-**Android**
-- An ARM64 phone with Vulkan 1.1 and Android 12 or later; 8 GB of RAM recommended.
-- About 4.3 GB free for the ISO (the app does not copy it) plus 2 GB for the game's own HDD install. The APK is 35 MB.
-- Your disc image of .hack//Versus (see "Supported versions").
+Tested on a Samsung Galaxy S22 Ultra (Snapdragon 8 Gen 1, Android 16) and a Windows 10 PC (Ryzen 7 5700X3D,
+RTX 3050). Bug reports and pull requests are welcome.
 
-**Windows**
-- Windows 10 or 11, 64-bit, a CPU with AVX2 (Intel Haswell / AMD Zen or later) and a GPU with Vulkan 1.1 drivers.
-- Your ISO plus about 2 GB for the game's HDD install.
+## Download and play
 
-## Supported versions
+Download from **[Releases](../../releases)**.
+
+### Supported disc
 
 | Disc | Status |
 |---|---|
-| BLJS93008 (Japan, the game's only release) with the English translation patch applied | The version the port was made and tested with |
-| BLJS93008 unpatched | Should work (the executable shipped in the APK is the patched one; texts would be Japanese), untested |
-| Other regions or digital versions | None exist for this game |
+| BLJS93008 (Japan, the only release) with the English translation patch | Fully tested |
+| BLJS93008 unpatched | Should work (texts in Japanese), untested |
 
-The APK ships the game's executable already translated (what the PS3 ran as `EBOOT.BIN`): nothing to decrypt, no
-emulator needed. If you have your own `EBOOT.ELF`, the app prefers it when it sits next to the data.
+The game's translated executable ships with the port: nothing to decrypt, no PS3 firmware.
 
-## How to play (Android)
+### Android
 
-1. Download `hackversus.apk` from **Releases** and install it (allow "unknown apps" if Android asks).
-2. Copy your `.iso` to the phone, any folder (Downloads, for instance).
-3. Open the app and tap **Elegir ISO** ("Choose ISO"): Android's file picker opens; select your image. The app keeps
-   the permission on that file and never asks again. The first run takes longer (the game installs ~2 GB to its
-   virtual HDD, as on the PS3, and shaders compile); afterwards it starts in about 20 seconds.
+Needs an ARM64 phone with Vulkan 1.1, Android 12+, 8 GB of RAM recommended, and about 2 GB free for the game's
+HDD install (the ISO is read in place, not copied).
 
-Alternatives, if you would rather not use the picker:
-- Leave the ISO in `/sdcard/PS3/` and tap **Dar permiso** ("Grant permission") in the dialog: it opens the app's
-  own "All files access" switch. Same folder and same file the ARMSX3 emulator uses, in case you have both.
+1. Install `hackversus.apk` (allow "unknown apps" if asked).
+2. Copy your `.iso` anywhere on the phone (Downloads, for example).
+3. Open the app, tap **Elegir ISO** ("Choose ISO") and select the image. The first start takes a few minutes (the
+   game installs ~2 GB to its virtual HDD and shaders compile); afterwards it starts in about 20 seconds.
+
+<details>
+<summary>Other ways to give it the game, and where data is kept</summary>
+
+- Put the ISO in `/sdcard/PS3/` and tap **Dar permiso** ("Grant permission") to allow all-files access (same folder
+  the ARMSX3 emulator uses).
 - Or extract the disc on a PC (`python tools/iso_extract.py <your.iso> all disc`) and copy `disc/PS3_GAME` to
-  `/sdcard/PS3/vfs/PS3_GAME` or to `Android/data/com.hackversus.port/files/PS3/vfs/PS3_GAME` (the latter needs no
-  permission).
+  `Android/data/com.hackversus.port/files/PS3/vfs/PS3_GAME`.
 
-Where the app keeps things:
 ```
 Android/data/com.hackversus.port/files/
-  PS3/dev_hdd0/game/BLJS93008/           the game's HDD install (~2 GB, made by the game itself)
-  PS3/dev_hdd0/home/00000001/savedata/   saves (with /sdcard/PS3 they go to /sdcard/PS3/dev_hdd0/...)
-  PS3/hv_env.txt                          options (see below)
-  EBOOT.ELF, spirv/, pipeline.cache       the unpacked executable and the shader caches
-  log.txt                                 the session log (truncated at every launch)
+  PS3/dev_hdd0/game/BLJS93008/           the game's HDD install
+  PS3/dev_hdd0/home/00000001/savedata/   saves
+  PS3/hv_env.txt                         options
+  PS3/hv_mods.txt                        character mods
+  log.txt                                session log
 ```
-Uninstalling the app deletes that folder, saves included: copy them first if they matter to you.
+Uninstalling the app deletes this folder, **saves included**: back them up first.
+</details>
 
-## How to play (Windows)
+### Windows
 
-1. Download `hackversus-windows.zip` from **Releases** and unzip it anywhere: `hackversus.exe`, `SDL2.dll` and the
-   game's translated executable `EBOOT.ELF`.
-2. Run `hackversus.exe` and choose your `.iso` in the dialog (or drop the `.iso` onto `hackversus.exe`). The game
-   remembers it; the next starts go straight in. The first run takes longer (the ~2 GB HDD install and the shader
-   caches).
+Needs Windows 10/11 64-bit, a CPU with AVX2 (Intel Haswell / AMD Zen or later) and a Vulkan 1.1 GPU.
 
-Nothing to extract and nothing to install: Windows mounts the ISO read-only (the same mount as double-clicking it in
-Explorer) while the game runs, and unmounts it when the game closes. Saves, the HDD install, the shader caches and
-`log.txt` go to `data/` next to the executable; options go in `hv_env.txt` next to it. An extracted disc in a `disc`
-folder next to the executable also works.
+1. Unzip `hackversus-windows.zip` anywhere.
+2. Run `hackversus.exe` and choose your `.iso` (or drop the ISO onto the exe). It is remembered for next time.
+
+Windows mounts the ISO read-only while the game runs. Saves, caches and `log.txt` go to `data/` next to the exe.
 
 ## Controls
 
-- **Bluetooth controller**: pair a DualShock 4 (or compatible) with Android before opening the app; the port assigns
-  it to port 1 with the PS3 mapping (✕○□△, L1/R1/L2/R2, L3/R3, START/SELECT, d-pad and sticks).
-- **Touch pad**: always active as player 1; the **PAD** button (top centre) hides or shows it.
-- **Windows**: any controller SDL recognises (DualShock 4, DualSense, Xbox…). Without one, the keyboard: arrows = d-pad,
-  Z/X/A/S = ✕/○/□/△, Q/W = L1/R1, 1/2 = L2/R2, Enter = START, Tab = SELECT. F11 or Alt+Enter switches between full
-  screen and a window; Esc leaves full screen (in a window it closes the game).
-- The game's own controls are in the game: during a fight, START → "Basic Operation", "Command List" and
-  "Battle Key Config".
+| | |
+|---|---|
+| Controller | PS3 layout: ✕○□△, L1/R1/L2/R2, L3/R3, START/SELECT, d-pad and sticks. On Android pair it before opening the app. |
+| Touch pad (Android) | Always active as player 1; the **PAD** button hides it. |
+| Keyboard (Windows) | Arrows = d-pad · Z/X/A/S = ✕/○/□/△ · Q/W = L1/R1 · 1/2 = L2/R2 · Enter = START · Tab = SELECT |
+| Window (Windows) | F11 or Alt+Enter toggle full screen; Esc leaves full screen. |
+
+The move lists are in the game: during a fight, START → "Command List".
 
 ## Options (`hv_env.txt`)
 
-A file named `hv_env.txt` in the data folder (`Android/data/com.hackversus.port/files/PS3/` in ISO mode, or
-`/sdcard/PS3/`; on Windows next to `hackversus.exe`), one `VARIABLE=value` per line:
+A text file with one `VARIABLE=value` per line, in `files/PS3/` on Android or next to `hackversus.exe` on Windows.
 
 | Variable | Effect |
 |---|---|
-| `PS3_OSK_TEXT=NAME` | What the port types when the game asks for text (Story Mode: 8 characters at most, and the game does not let you change it later). Default `PLAYER`. |
-| `HV_KEEP_ASPECT=1` | 16:9 with bars instead of stretching to the whole screen. |
-| `HV_INTRO=orig` | The full intro (by default only the Bandai Namco and CRIWARE logos are shown). |
-| `HV_JC_PAR=n` | Threads for the SPU jobs (3 by default). |
-| `HV_AUDIO_LEGACY_PACE=1` | ps3recomp's original audio mixer (in case the new one sounds worse on your device). |
-| `HV_LOG=0` | No log: `log.txt` is not written. |
+| `PS3_OSK_TEXT=NAME` | Name typed for you when Story Mode asks (8 characters max). Default `PLAYER`. |
+| `HV_KEEP_ASPECT=1` | 16:9 with black bars instead of stretching. |
+| `HV_INTRO=orig` | Full intro (by default only the Bandai Namco and CRIWARE logos). `HV_INTRO=0,17` skips the logos too. |
+| `HV_PIPE_PREWARM=0` | Do not precreate graphics pipelines at start (on by default; avoids stutters the first time an effect appears). |
+| `HV_JC_PAR=n` | Threads for SPU jobs (default 3). |
+| `HV_AUDIO_LEGACY_PACE=1` | ps3recomp's original audio mixer. |
+| `HV_LOG=0` | Do not write `log.txt`. |
 | `PS3RECOMP_VK_FULLSCREEN=0` | Windows: start in a window. |
+
+## Character mods (experimental)
+
+The port can swap a character's model for another one **as an extra colour** in the character select, leaving the
+original colours untouched. Mods are listed in `hv_mods.txt` (`files/PS3/` on Android, `data/` on Windows):
+
+```
+# subst <model> <colour index> <carousel slot> <offset in DATA.CPK, hex> <length> <file>
+subst 1kit01 2 3 BE07800 7393184 mods/my_kite.bin
+```
+
+That line adds **colour 3** to Kite (carousel slot 3) and serves `mods/my_kite.bin` instead of the original model data
+when that colour is picked. The replacement must be the same size and format as the original entry in `DATA.CPK`.
+No mod files are distributed with the port. Available from APK v0.4, and on Windows when built from source.
 
 ## Known issues
 
-- Fights do not hold a steady 30 fps with the battery saver on (the cores stay at 1.2–1.8 GHz); without it there is
-  headroom. The bottleneck is the CPU (the game's main thread, the SPU skinning jobs, the RSX command stream), not
-  the GPU.
-- Story Mode asks for a character name through the on-screen keyboard: the port fills it in by itself (`PS3_OSK_TEXT`).
-- No online, no real trophies, no user music (all stubs).
-- After a long session the phone heats up and lowers its clocks: normal, not a port bug.
+- Story Mode asks for a name with the on-screen keyboard; the port fills it in (`PS3_OSK_TEXT`) and it cannot be
+  changed later.
+- No online, trophies or custom music.
+- After long sessions the phone heats up and slows down; that is the phone, not the port.
 
-## Roadmap
+**Roadmap:** online Versus between PC and Android through a replacement lobby server (the original servers are gone).
 
-- **Online, cross-platform Versus (PC vs Android).** The game's online mode uses PSN Matching2 rooms, Signaling to
-  exchange the opponents' addresses and then plain P2P sockets (`sys_net`). Its servers are gone, so the plan is a
-  replacement lobby server (first built into the PC version for play on the same network, later on the internet with
-  NAT hole punching or a relay). Both builds run the same translated game code, so a PC and a phone are two identical
-  PS3s to the game; the open questions are desyncs (both sides must compute every frame exactly alike, and some fast
-  floating-point paths differ between ARM and x86) and the slower device setting the pace.
-- **A steady 30 fps in fights on Android** (profile-guided optimisation is being measured).
+## Building from source
 
-## Building
+Everything lives in the project folder; nothing is installed system-wide.
 
-The whole environment is portable and lives in the project folder; nothing is installed system-wide.
+<details>
+<summary>Build steps</summary>
 
 1. **Toolchain** (not included): Android NDK r30, CMake ≥ 3.28, Ninja, JDK 17, build-tools 35.0.1 and the API 35
-   `android.jar`, Python 3.10 with `pip install -r ps3recomp-0.18.0/requirements.txt`, and in `sysroot/` SDL2 and
-   glslang built for `arm64-v8a`.
-2. **Lifting the game** (once, on the PC; `game/EBOOT.ELF` is the decrypted executable, which an emulator with
-   `PPU Debug` dumps to `cache/ppu_progs/BLJS93008-*/exec.elf`):
+   `android.jar`, Python 3.10 with `pip install -r ps3recomp-0.18.0/requirements.txt`, and SDL2 + glslang for
+   `arm64-v8a` in `sysroot/`.
+2. **Lift the game** once (`game/EBOOT.ELF` is the decrypted executable, e.g. dumped by an emulator):
    ```
    P=.venv/Scripts/python; R=ps3recomp-0.18.0/tools
    $P $R/ppu_loader.py game/EBOOT.ELF -o analysis/
@@ -155,47 +155,38 @@ The whole environment is portable and lives in the project folder; nothing is in
    $P $R/ppu_lifter.py game/EBOOT.ELF --functions analysis/functions.json --hle-stubs analysis/EBOOT.imports.json \
        --code-end 0x7bf7b0 --chunks 64 -o recomp/
    ```
-   The SPURS jobs (skinning) are not in the ELF: they are dumped on the phone with `SPU_DUMP_MISS=<dir>` the first
-   time the game uses them and go to `spu_jobs/*.elf`.
-3. **APK**: `tools/build_apk.sh` → `out/hackversus.apk` (configures CMake with the NDK, builds the runtime, the 64
-   translated PPU files and the SPUs, links `libmain.so`, packs `game/EBOOT.ELF` as an asset, compiles the Java
-   activity and signs with a debug key). A full PPU rebuild takes about 3 minutes on 16 cores.
+   The SPURS jobs (skinning) are dumped on the phone with `SPU_DUMP_MISS=<dir>` into `spu_jobs/*.elf`.
+3. **APK:** `tools/build_apk.sh` → `out/hackversus.apk`. The scripts patch the port's hooks into the generated code
+   (`tools/apply_recomp_hooks.py`) before compiling.
+   Releases use a profile-guided build: `HV_PGO=gen` to build an instrumented APK, play a fight, merge the profile
+   with `llvm-profdata merge -o pgo/fight.profdata hackversus.profraw`, then build with `HV_PGO=use:<path>`.
+4. **Windows:** with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (ucrt, x86_64) in `toolchain/`, run
+   `tools/build_win_deps.sh` once, then `tools/build_win.sh` → `out-win/hackversus.exe`.
 
-   **Profile-guided build** (what the releases use, about +2 fps in fights): `HV_PGO=gen HV_BUILD_DIR=build-apk-pgogen
-   tools/build_apk.sh`, play a fight with that APK (it writes `files/hackversus.profraw` every 15 s), merge it with the
-   NDK's `llvm-profdata merge -o pgo/fight.profdata hackversus.profraw` and build with
-   `HV_PGO=use:<path>/pgo/fight.profdata HV_BUILD_DIR=build-apk-pgouse tools/build_apk.sh`.
-4. **Windows**: with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (ucrt, x86_64) unpacked in `toolchain/`
-   (no Visual Studio needed), `tools/build_win_deps.sh` once (SDL2 and glslang into `sysroot-win/`) and then
-   `tools/build_win.sh` → `out-win/hackversus.exe`. The PC build targets x86-64-v3 (AVX2) and uses the same Vulkan
-   backend through SDL2. `tools/win_fight.sh [VAR=value ...]` reaches a CPU vs CPU fight with the keyboard and
-   measures it (it takes over the window and keyboard for about two minutes).
+Test helpers in `tools/`: `goto_title.sh`, `goto_fight.sh`, `measure_fight.sh` (phone over adb, the device is
+detected automatically) and `win_fight.sh` (PC, reaches a CPU vs CPU fight with the keyboard).
+</details>
 
-The scripts in `tools/` (`goto_fight.sh`, `measure_fight.sh`, `prof_threads_fast.py`, …) reach a fight without
-touching the phone, measure fps and profile; they carry the adb id of the device the port was developed on, change it
-to yours.
+<details>
+<summary>What changed from ps3recomp 0.18.0</summary>
 
-## What changed from ps3recomp 0.18.0
+The toolkit is in `ps3recomp-0.18.0/` with this port's changes (MIT licence). Highlights: a Vulkan backend for
+Android (merged render passes, draw batches, a submit thread, asynchronous present, pipeline prewarm), shader
+register files scalarised for Adreno, SPURS jobs in parallel threads, SPU event queues for the sound driver, VMX and
+scalar FP on NEON, NEON vertex and index fetch, a working `cellOskDialog`, saving, touch pad and controller, and a
+file-read hook used by the character mods. For Windows: the Vulkan backend built with mingw, SDL2 for pad and audio,
+a GCM callback thread and the keyboard fallback. The ISO reader (`hackversus/isofs.c`) sits under the host file API.
+Details are in the code comments.
+</details>
 
-The toolkit is included in `ps3recomp-0.18.0/` with this port's modifications (MIT licence, see its `LICENSE`).
-Among others: a Vulkan backend for Android (merged render passes, draw batches, asynchronous present, depth read as
-colour in compute), scalarised shader register files for Adreno, SPURS jobs in parallel on threads, SPU event queues
-for the sound driver, VMX and scalar FP in NEON without NaN checks, NEON vertex and index fetch, a working
-`cellOskDialog`, saving, the touch pad and the controller. For Windows: the Vulkan backend built with mingw (a
-`LoadLibrary` loader instead of `dlopen`), SDL2 for pad and audio, a GCM callback thread, the keyboard fallback with
-any pad backend, and an audio mixer that leaves the game's sound drivers one block period between blocks. The ISO reader (`hackversus/isofs.c`) hangs under the host
-file API with the linker's `--wrap`, so no runtime layer changes. The technical details are in the code comments.
-
-## Credits
+## Credits and license
 
 - CyberConnect2 and Bandai Namco, creators of .hack//Versus.
-- [sp00nznet](https://github.com/sp00nznet/ps3recomp), for ps3recomp.
+- [sp00nznet](https://github.com/sp00nznet/ps3recomp) for ps3recomp.
 - The team behind the .hack//Versus English translation patch.
 - SDL2, glslang, the Android NDK and llvm-mingw.
 
-## License
-
-The code in this repository is under the [MIT license](LICENSE), like ps3recomp; third-party components keep their
-own licenses. It grants no rights to the game: .hack//Versus belongs to CyberConnect2 and Bandai Namco. This
-repository contains no game data; the APK and the Windows build contain the game's code translated to ARM64 by static recompilation and
-does not work without a legitimate copy of the disc. If the rights holders ask, it comes down.
+The code here is under the [MIT license](LICENSE); third-party parts keep their own licenses. It grants no rights to
+the game, which belongs to CyberConnect2 and Bandai Namco. The repository contains no game data; the builds contain
+the game's code translated by static recompilation and need a legitimate copy of the disc to run. If the rights
+holders ask, it comes down.

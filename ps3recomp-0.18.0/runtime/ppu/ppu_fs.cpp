@@ -473,6 +473,11 @@ static inline void fs_prefault(uint32_t buf, uint64_t len)
     p[len - 1] = p[len - 1];
 }
 
+/* Port hook (hackversus/stubs.cpp, mods): told of every read into guest memory with its file position, so a port
+ * can find where the title keeps a piece of a file it read (the DATA.CPK index). */
+extern "C" void (*g_hv_fs_read_hook)(int fd, long long pos, uint32_t buf, size_t n);
+void (*g_hv_fs_read_hook)(int fd, long long pos, uint32_t buf, size_t n) = nullptr;
+
 static void cellFsRead(ppu_context* ctx)
 {
     int fd          = (int)(uint32_t)ctx->gpr[3];
@@ -487,6 +492,7 @@ static void cellFsRead(ppu_context* ctx)
     fs_prefault(buf, nbytes);
     fs_set_dir(fd, f, 1);
     size_t n = fread(vm_base + buf, 1, (size_t)nbytes, f);   /* raw bytes, no swap */
+    if (g_hv_fs_read_hook && fpos_before >= 0) g_hv_fs_read_hook(fd, (long long)fpos_before, buf, n);
     /* PS3_FSLOG_EOF=<fd>,<bytes>: report end-of-file past <bytes> on one descriptor.
      * The intro cinematic is 28 seconds and this port renders it at a few frames
      * a second, so it cannot be watched to its end -- truncating the stream makes
@@ -965,6 +971,7 @@ static void cellFsAioRead(ppu_context* ctx)
         const int64_t pos = (int64_t)HOST_FTELL64(f);
         if (HOST_FSEEK64(f, offset) == 0)
             n = fread(vm_base + buf, 1, (size_t)size, f);
+        if (g_hv_fs_read_hook) g_hv_fs_read_hook(fd, (long long)offset, buf, n);
         if (pos >= 0) HOST_FSEEK64(f, pos);
         HOST_UNLOCKFILE(f);
         err = CELL_OK;

@@ -13,6 +13,8 @@ A=/sdcard/Android/data/com.hackversus.port/files/PS3
 # Sin partida guardada, el salto automático (✕ cada 1,5 s) atraviesa la intro hasta los monos. CON partida el juego
 # llega solo al título y esas ✕ entrarían a STORY MODE (el hub ALTIMIT): no activarlo.
 if adb -s $S shell "ls $A/dev_hdd0/home/00000001/savedata/BLJS93008-HACK_VERSUS/VERSUS.S" 2>/dev/null | grep -q VERSUS.S; then ENV=""; else ENV="HV_AUTOSKIP=1\n"; fi
+# Mientras trabajamos: sin logos de arranque (HV_INTRO=0,17: carga y siguiente escena); una HV_INTRO=... la reemplaza.
+case " $* " in *" HV_INTRO="*) ;; *) ENV="${ENV}HV_INTRO=0,17\n" ;; esac
 for kv in "$@"; do ENV="$ENV$kv\n"; done
 adb -s $S shell "printf '$ENV' > $A/hv_env.txt; am force-stop com.hackversus.port; am start -n com.hackversus.port/.SetupActivity" >/dev/null
 sleep 12

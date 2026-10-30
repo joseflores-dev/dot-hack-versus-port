@@ -12,6 +12,8 @@ CM=$TC/cmake-4.4.5-windows-x86_64/bin/cmake
 B=build-win
 
 IN="$W/game/EBOOT.ELF"; for e in spu_jobs/*.elf; do IN="$IN;$W/$e"; done
+# Ganchos del port en el código generado (mods de personajes): recomp/ está fuera del repo.
+python -I tools/apply_recomp_hooks.py recomp || exit 1
 $CM -S hackversus -B $B -G Ninja -DCMAKE_MAKE_PROGRAM=$TC/ninja.exe -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER=$MG/bin/x86_64-w64-mingw32-clang.exe -DCMAKE_CXX_COMPILER=$MG/bin/x86_64-w64-mingw32-clang++.exe \
     -DCMAKE_RC_COMPILER=$MG/bin/x86_64-w64-mingw32-windres.exe \
