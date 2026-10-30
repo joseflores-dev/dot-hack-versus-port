@@ -686,6 +686,7 @@ static const u32 s_zero_dyn[2] = { 0, 0 };
  * (HV_VKTIME=1): the profiler sees libgsl but not which call it is under. */
 static int s_vkt_on = -1;
 static unsigned long long s_vkt_ns[4], s_vkt_n[4];   /* submit, descriptors, end, begin */
+static unsigned long long s_vkt_passes, s_vkt_clears, s_vkt_pass_px;   /* engine render passes, clears, pixels */
 static inline unsigned long long vkt_now(void)
 {
     if (s_vkt_on < 0) s_vkt_on = getenv("HV_VKTIME") && getenv("HV_VKTIME")[0] == '1';
@@ -860,10 +861,40 @@ static int vk_dedup_on(void)
     if (on < 0) on = getenv("HV_NO_STATE_DEDUP") == NULL;
     return on;
 }
-static void vk_pass_close_on(VkCommandBuffer cb)
+/* HV_VKTIME=1: who closed each merged pass (call site), for the frame-rate line. */
+static struct { uintptr_t site; unsigned long long n; } s_pc_sites[16];
+__attribute__((noinline)) static void vk_pass_close_on(VkCommandBuffer cb)
 {
-    if (s_pass.open && cb == s_vk.cmd) { pvkCmdEndRenderPass(cb); s_pass.open = 0; }
+    if (s_pass.open && cb == s_vk.cmd) {
+        pvkCmdEndRenderPass(cb); s_pass.open = 0;
+        const uintptr_t site = (uintptr_t)__builtin_return_address(0);
+        for (int i = 0; i < 16; i++)
+            if (s_pc_sites[i].site == site || !s_pc_sites[i].site) { s_pc_sites[i].site = site; s_pc_sites[i].n++; break; }
+    }
     s_dd.valid = 0;
+}
+static unsigned long long s_pass_why[3];   /* a new pass because: none open, another target, samples its own target */
+
+/* Clears folded into the next pass (HV_CLEAR_FOLD=1; off by default: ~4 of a fight frame's ~11 clears fold, but
+ * the A/B showed no change in fps or GPU busy time). A clear of an engine
+ * target is held here instead of being recorded; when the next pass draws into that whole image it begins
+ * with loadOp CLEAR for it, so a tiler clears in tile memory instead of writing the image out and reading it
+ * back in (a .hack//Versus fight frame has ~10 clears and ~25 passes, with the GPU capped at 285 MHz by the
+ * battery saver). Anything else that may touch an image -- a barrier or a full dependency on the walker's
+ * buffer, a flush, a present -- records the held clears first (vk_pcl_materialize), in their order. */
+typedef struct { u32 obj; VkImage img; u32 w, h; int depth; VkImageAspectFlags aspect; VkClearValue v; } vk_pcl;
+#define VK_PCL_MAX 8u
+static vk_pcl s_pcl[VK_PCL_MAX];
+static u32 s_pcl_n;
+static int s_pcl_busy;
+static int s_cmd_rec;                 /* s_vk.cmd begun and not yet ended */
+static unsigned long long s_vkt_folded;
+static void vk_pcl_materialize(void);
+static int vk_clear_fold_on(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("HV_CLEAR_FOLD") && getenv("HV_CLEAR_FOLD")[0] == '1';
+    return on;
 }
 static int vk_rp_merge_on(void)
 {
@@ -876,6 +907,7 @@ static int vk_rp_merge_on(void)
  * this command buffer, the present's copy included. */
 static void vk_cmd_after_everything(VkCommandBuffer cb)
 {
+    if (cb == s_vk.cmd) vk_pcl_materialize();
     vk_pass_close_on(cb);
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
                            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
@@ -985,8 +1017,10 @@ static void vk_pcache_open(void)
     if (path && *path) VK_LOG("pipeline cache %s: %zu bytes loaded\n", path, size);
     free(data);
 }
+static void vk_pw_save(void);
 static void vk_pcache_save(void)
 {
+    vk_pw_save();
     const char* path = getenv("HV_PIPELINE_CACHE");
     if (!s_pcache || !s_pcache_dirty || !path || !*path) return;
     s_pcache_dirty = 0;
@@ -1011,6 +1045,7 @@ static int vk_begin(void)
     const unsigned long long tb = vkt_now();
     VK_CHECK(pvkBeginCommandBuffer(s_vk.cmd, &bi), "vkBeginCommandBuffer");
     vkt_add(3, tb);
+    s_cmd_rec = 1;
     s_pass.open = 0;
     vk_ts_begin();
     /* A present's copy may still be reading the surface this frame is about
@@ -1040,8 +1075,10 @@ static void vk_slots_settled(void)
 
 static int vk_submit_and_wait(void)
 {
+    vk_pcl_materialize();
     vk_pass_close_on(s_vk.cmd);
     vk_ts_end();
+    s_cmd_rec = 0;
     VK_CHECK(pvkEndCommandBuffer(s_vk.cmd), "vkEndCommandBuffer");
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                         .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
@@ -1049,6 +1086,7 @@ static int vk_submit_and_wait(void)
     s_eb_sub_serial++;
     struct timespec t0, t1; timespec_get(&t0, TIME_UTC);
     VK_CHECK(vk_queue_submit(&si, s_vk.fence), "vkQueueSubmit");
+    s_eb_pending = 0;                    /* everything recorded went with it */
     VK_CHECK(vk_fence_wait(s_vk.fence), "vkWaitForFences");
     timespec_get(&t1, TIME_UTC);
     vk_ts_read(vk_ts_slot());
@@ -1078,6 +1116,7 @@ static int vk_submit_and_wait(void)
 static void vk_barrier_image_on(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect,
                                 VkImageLayout old_layout)
 {
+    if (cb == s_vk.cmd) vk_pcl_materialize();
     vk_pass_close_on(cb);
     VkImageMemoryBarrier b = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -1096,6 +1135,42 @@ static void vk_barrier_image_on(VkCommandBuffer cb, VkImage img, VkImageAspectFl
 static void vk_barrier_image(VkImage img, VkImageAspectFlags aspect, VkImageLayout old_layout)
 {
     vk_barrier_image_on(s_vk.cmd, img, aspect, old_layout);
+}
+
+/* Record the held clears into the walker's buffer, as the clear calls used to. */
+static void vk_pcl_materialize(void)
+{
+    if (!s_pcl_n || s_pcl_busy) return;
+    s_pcl_busy = 1;
+    /* Counted into the batch either way, so a flush submits them even when the buffer was begun by a path
+     * that then recorded nothing; a waited submit (vk_submit_and_wait) takes the count back to zero. */
+    if (!s_cmd_rec && vk_begin()) { s_pcl_n = 0; s_pcl_busy = 0; return; }
+    const u32 n = s_pcl_n;
+    s_pcl_n = 0;
+    for (u32 k = 0; k < n; k++) {
+        const vk_pcl* c = &s_pcl[k];
+        if (c->depth) {
+            VkImageSubresourceRange r = { c->aspect, 0, 1, 0, 1 };
+            vk_barrier_image(c->img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_GENERAL);
+            pvkCmdClearDepthStencilImage(s_vk.cmd, c->img, VK_IMAGE_LAYOUT_GENERAL, &c->v.depthStencil, 1, &r);
+        } else {
+            VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+            vk_barrier_image(c->img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+            pvkCmdClearColorImage(s_vk.cmd, c->img, VK_IMAGE_LAYOUT_GENERAL, &c->v.color, 1, &r);
+        }
+        s_vkt_clears++;
+        s_eb_pending++;
+    }
+    s_pcl_busy = 0;
+}
+
+/* Hold a clear (vk_clear_fold_on). One already held for the same image is recorded first, keeping order. */
+static void vk_pcl_hold(u32 obj, VkImage img, u32 w, u32 h, int depth, VkImageAspectFlags aspect, VkClearValue v)
+{
+    for (u32 k = 0; k < s_pcl_n; k++)
+        if (s_pcl[k].img == img) { vk_pcl_materialize(); break; }
+    if (s_pcl_n == VK_PCL_MAX) vk_pcl_materialize();
+    s_pcl[s_pcl_n++] = (vk_pcl){ obj, img, w, h, depth, aspect, v };
 }
 
 /* ---------------------------------------------------------------------------
@@ -2845,6 +2920,8 @@ static void vk_eng_release(void* user, u32 handle)
 {
     (void)user;
     if (!handle || handle >= VK_ENG_MAX_OBJ || s_eobj[handle].kind == VK_ENG_FREE) return;
+    for (u32 k = 0; k < s_pcl_n; )             /* a clear held for it would clear nothing now */
+        if (s_pcl[k].img == s_eobj[handle].im.img) s_pcl[k] = s_pcl[--s_pcl_n]; else k++;
     if (s_eobj[handle].kind == VK_ENG_COLOR)
         for (u32 i = 1; i < VK_ENG_MAX_OBJ; i++)
             if (s_eobj[i].kind == VK_ENG_VIEW && s_eobj[i].surface == handle) {
@@ -2972,12 +3049,19 @@ static void vk_eng_clear_color(void* user, u32 surface, const float rgba[4])
     vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
     if (!o) return;
     const int batched = vk_eb_active();
+    if (batched && vk_clear_fold_on()) {
+        VkClearValue cv;
+        memcpy(cv.color.float32, rgba, sizeof cv.color.float32);
+        vk_pcl_hold(surface, o->im.img, o->w, o->h, 0, VK_IMAGE_ASPECT_COLOR_BIT, cv);
+        return;
+    }
     if (batched ? (!s_eb_pending && vk_begin()) : vk_begin()) return;
     VkClearColorValue v;
     memcpy(v.float32, rgba, sizeof v.float32);
     VkImageSubresourceRange r = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
     pvkCmdClearColorImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &v, 1, &r);
+    s_vkt_clears++;
     if (batched) vk_eb_recorded();
     else vk_submit_and_wait();
 }
@@ -2992,11 +3076,17 @@ static void vk_eng_clear_depth_stencil(void* user, u32 depth, u32 flags,
     if (flags & RSX_BE_CLEAR_STENCIL) aspect |= s_vk.depth_aspect & VK_IMAGE_ASPECT_STENCIL_BIT;
     if (!o || !aspect) return;
     const int batched = vk_eb_active();
+    if (batched && vk_clear_fold_on()) {
+        VkClearValue cv = { .depthStencil = { depth_value, stencil } };
+        vk_pcl_hold(depth, o->im.img, o->w, o->h, 1, aspect, cv);
+        return;
+    }
     if (batched ? (!s_eb_pending && vk_begin()) : vk_begin()) return;
     VkClearDepthStencilValue d = { depth_value, stencil };
     VkImageSubresourceRange r = { aspect, 0, 1, 0, 1 };
     vk_barrier_image(o->im.img, s_vk.depth_aspect, VK_IMAGE_LAYOUT_GENERAL);
     pvkCmdClearDepthStencilImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &d, 1, &r);
+    s_vkt_clears++;
     if (batched) vk_eb_recorded();
     else vk_submit_and_wait();
 }
@@ -3050,6 +3140,7 @@ static void vk_eng_present(void* user, u32 surface)
     if (!s_vk.device) return;
     if (hv_adpf_frame) hv_adpf_frame();
     if (hv_autoskip_watch && !hv_autoskip_done) vk_eng_autoskip_check(surface);
+    vk_pcl_materialize();
     if (s_eb_pending) vk_eng_flush_async();   /* the present records on its own buffer */
     vk_eng_obj* o = vk_eng_get(surface, VK_ENG_COLOR);
     pthread_mutex_lock(&s_vk.present_mu);
@@ -3661,7 +3752,28 @@ typedef struct vk_eng_pipe {
     VkFormat            rt_fmt;          /* picks the render pass it is built against */
     u32                 cube_mask;       /* TextureCube units: the split set layout */
     VkPipeline          variant[VK_ENG_TOPOLOGIES];
+    u32                 recipe;          /* 1 + its entry in the prewarm list (s_pw), 0 none */
 } vk_eng_pipe;
+
+/* Pipeline prewarm (HV_PIPE_PREWARM=0 turns it off). Every engine pipeline the title asks for is noted as a
+ * recipe -- both programs' text, the render state, the vertex slots, the target format and count, and the
+ * topologies drawn with -- in <HV_PIPELINE_CACHE>.list. On the first pipeline of a run (the boot logos) all
+ * the recipes are built at once from the disk caches; a later request for one is handed the built pipeline.
+ * The first fight of a run made ~96 pipelines, 1-5 ms each and several in one frame, the first time each
+ * move or effect appeared. */
+typedef struct {
+    u64 key;
+    char *vs, *ps;
+    rsx_be_render_state rs;
+    u32 nslots, stride, rt_count, topo_mask;
+    VkFormat cf;
+    vk_eng_pipe pre;                     /* built at prewarm, until a request takes it (pre.used) */
+} vk_pw_recipe;
+#define VK_PW_MAX 1024u
+static vk_pw_recipe s_pw[VK_PW_MAX];
+static u32 s_pw_n;
+static int s_pw_dirty, s_pw_done;
+static unsigned long long s_pw_taken;
 
 static vk_eng_pipe s_epipe[VK_ENG_MAX_PIPE];
 
@@ -3745,6 +3857,42 @@ static VkRenderPass vk_eng_render_pass(VkFormat cf, u32 n)
     if (pvkCreateRenderPass(s_vk.device, &rci, NULL, &s_e2.rp[fi][n]) != VK_SUCCESS)
         s_e2.rp[fi][n] = VK_NULL_HANDLE;
     return s_e2.rp[fi][n];
+}
+
+/* vk_eng_render_pass with loadOp CLEAR on the attachments in `mask` (bit i: colour i; bit 8: depth; bit 9:
+ * stencil). Compatible with the plain one, so its framebuffers and pipelines serve. */
+static VkRenderPass vk_eng_render_pass_clear(VkFormat cf, u32 n, u32 mask)
+{
+    static struct { VkFormat cf; u32 n, mask; VkRenderPass rp; } cache[64];
+    static u32 used;
+    for (u32 i = 0; i < used; i++)
+        if (cache[i].cf == cf && cache[i].n == n && cache[i].mask == mask) return cache[i].rp;
+    if (n < 1 || n > RSX_BE_MAX_COLOR_TARGETS || used == 64u) return VK_NULL_HANDLE;
+    VkAttachmentDescription att[RSX_BE_MAX_COLOR_TARGETS + 1];
+    VkAttachmentReference   cref[RSX_BE_MAX_COLOR_TARGETS];
+    for (u32 i = 0; i <= n; i++) {
+        const int clr = i < n ? (mask >> i) & 1u : (mask >> 8) & 1u;
+        att[i] = (VkAttachmentDescription){
+            .format = (i < n) ? cf : s_vk.depth_format,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = clr ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = (i == n && ((mask >> 9) & 1u)) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .initialLayout = VK_IMAGE_LAYOUT_GENERAL, .finalLayout = VK_IMAGE_LAYOUT_GENERAL };
+        if (i < n) cref[i] = (VkAttachmentReference){ i, VK_IMAGE_LAYOUT_GENERAL };
+    }
+    VkAttachmentReference dref = { n, VK_IMAGE_LAYOUT_GENERAL };
+    VkSubpassDescription sub = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 .colorAttachmentCount = n, .pColorAttachments = cref,
+                                 .pDepthStencilAttachment = &dref };
+    VkRenderPassCreateInfo rci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+                                   .attachmentCount = n + 1, .pAttachments = att,
+                                   .subpassCount = 1, .pSubpasses = &sub };
+    VkRenderPass rp = VK_NULL_HANDLE;
+    if (pvkCreateRenderPass(s_vk.device, &rci, NULL, &rp) != VK_SUCCESS) return VK_NULL_HANDLE;
+    cache[used++] = (typeof(cache[0])){ cf, n, mask, rp };
+    return rp;
 }
 
 /* Tables carried from the Metal backend, itself copied from the D3D12 live
@@ -3884,6 +4032,13 @@ static u32 vk_eng_cube_units(const char* ps_hlsl)
     return mask;
 }
 
+static void vk_pw_prewarm(void);
+static u64 vk_pw_key(const char* vs, const char* ps, const rsx_be_render_state* rs, u32 nslots, u32 stride,
+                     u32 rt_count, VkFormat cf);
+static vk_pw_recipe* vk_pw_find(u64 key);
+static vk_pw_recipe* vk_pw_note(u64 key, const char* vs, const char* ps, const rsx_be_render_state* rs,
+                                u32 nslots, u32 stride, u32 rt_count, VkFormat cf);
+
 static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* ps_hlsl,
                                   const rsx_be_render_state* rs, const rsx_vertex_layout_plan* layout,
                                   u32 vertex_stride, rsx_be_format rt_fmt, u32 rt_count)
@@ -3910,6 +4065,17 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
     }
     vk_eng_pipe* P = &s_epipe[slot];
     memset(P, 0, sizeof *P);
+    vk_pw_prewarm();
+    const u32 nslots = layout->count;
+    const u64 key = vk_pw_key(vs_hlsl, ps_hlsl, rs, nslots, vertex_stride, rt_count, cf);
+    vk_pw_recipe* R = vk_pw_find(key);
+    if (R && R->pre.used) {              /* built at prewarm */
+        *P = R->pre;
+        memset(&R->pre, 0, sizeof R->pre);
+        P->recipe = (u32)(R - s_pw) + 1u;
+        s_pw_taken++;
+        return slot + 1u;
+    }
     if (vk_eng_translate(vs_hlsl, RSX_SHADER_STAGE_VERTEX, &P->vs)) return 0;
     if (vk_eng_translate(ps_hlsl, RSX_SHADER_STAGE_FRAGMENT, &P->fs)) {
         pvkDestroyShaderModule(s_vk.device, P->vs, NULL); memset(P, 0, sizeof *P); return 0;
@@ -3921,6 +4087,8 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
     P->rt_fmt = cf;
     P->cube_mask = vk_eng_cube_units(ps_hlsl);
     P->used = 1;
+    if (!R) R = vk_pw_note(key, vs_hlsl, ps_hlsl, rs, nslots, vertex_stride, rt_count, cf);
+    if (R) P->recipe = (u32)(R - s_pw) + 1u;
     return slot + 1u;
 }
 
@@ -4067,14 +4235,147 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
         .pViewportState = &vps, .pRasterizationState = &ras, .pMultisampleState = &ms,
         .pDepthStencilState = &ds, .pColorBlendState = &cb, .pDynamicState = &dy,
         .layout = layout, .renderPass = rp, .subpass = 0 };
-    if (pvkCreateGraphicsPipelines(s_vk.device, s_pcache, 1, &gci, NULL,
-                                   &P->variant[topo_idx]) != VK_SUCCESS) {
+    static int pipelog = -1;
+    if (pipelog < 0) pipelog = getenv("HV_PIPELOG") != NULL;
+    struct timespec pt0, pt1;
+    if (pipelog) clock_gettime(CLOCK_MONOTONIC, &pt0);
+    const VkResult pr = pvkCreateGraphicsPipelines(s_vk.device, s_pcache, 1, &gci, NULL, &P->variant[topo_idx]);
+    if (pipelog) {
+        clock_gettime(CLOCK_MONOTONIC, &pt1);
+        VK_LOG("[pipelog] %ld.%03ld variant topo %u: %.2f ms\n", (long)pt1.tv_sec, pt1.tv_nsec / 1000000L, topo_idx,
+               (pt1.tv_sec - pt0.tv_sec) * 1e3 + (pt1.tv_nsec - pt0.tv_nsec) * 1e-6);
+    }
+    if (pr == VK_SUCCESS && P->recipe && !(s_pw[P->recipe - 1].topo_mask & (1u << topo_idx))) {
+        s_pw[P->recipe - 1].topo_mask |= 1u << topo_idx;
+        s_pw_dirty = 1;
+    }
+    if (pr != VK_SUCCESS) {
         VK_LOG("engine: vkCreateGraphicsPipelines failed\n");
         P->variant[topo_idx] = VK_NULL_HANDLE;
     } else {
         s_pcache_dirty = 1;
     }
     return P->variant[topo_idx];
+}
+
+static int vk_pw_on(void)
+{
+    static int on = -1;
+    if (on < 0) on = !(getenv("HV_PIPE_PREWARM") && getenv("HV_PIPE_PREWARM")[0] == '0');
+    return on;
+}
+
+static u64 vk_pw_key(const char* vs, const char* ps, const rsx_be_render_state* rs, u32 nslots, u32 stride,
+                     u32 rt_count, VkFormat cf)
+{
+    u64 h = 1469598103934665603ull;
+    for (const char* c = vs; *c; c++) h = (h ^ (u8)*c) * 1099511628211ull;
+    h = (h ^ 0xFF) * 1099511628211ull;
+    for (const char* c = ps; *c; c++) h = (h ^ (u8)*c) * 1099511628211ull;
+    const u8* b = (const u8*)rs;
+    for (size_t i = 0; i < sizeof *rs; i++) h = (h ^ b[i]) * 1099511628211ull;
+    const u32 t[4] = { nslots, stride, rt_count, (u32)cf };
+    b = (const u8*)t;
+    for (size_t i = 0; i < sizeof t; i++) h = (h ^ b[i]) * 1099511628211ull;
+    return h ? h : 1;
+}
+
+static vk_pw_recipe* vk_pw_find(u64 key)
+{
+    for (u32 i = 0; i < s_pw_n; i++) if (s_pw[i].key == key) return &s_pw[i];
+    return NULL;
+}
+
+static vk_pw_recipe* vk_pw_note(u64 key, const char* vs, const char* ps, const rsx_be_render_state* rs,
+                                u32 nslots, u32 stride, u32 rt_count, VkFormat cf)
+{
+    if (!vk_pw_on() || s_pw_n == VK_PW_MAX) return NULL;
+    vk_pw_recipe* R = &s_pw[s_pw_n];
+    memset(R, 0, sizeof *R);
+    R->vs = strdup(vs); R->ps = strdup(ps);
+    if (!R->vs || !R->ps) { free(R->vs); free(R->ps); R->vs = R->ps = NULL; return NULL; }
+    R->key = key; R->rs = *rs; R->nslots = nslots; R->stride = stride; R->rt_count = rt_count; R->cf = cf;
+    s_pw_n++;
+    s_pw_dirty = 1;
+    return R;
+}
+
+/* The list file: "HVPL", version, sizeof(rsx_be_render_state), count, then per recipe its key, topologies,
+ * render state, slots, stride, target count and format, and the two programs as length + text. */
+static void vk_pw_path(char* out, size_t n)
+{
+    const char* c = getenv("HV_PIPELINE_CACHE");
+    out[0] = 0;
+    if (c && *c) snprintf(out, n, "%s.list", c);
+}
+
+static void vk_pw_save(void)
+{
+    char path[600], tmp[620];
+    if (!s_pw_dirty || !vk_pw_on()) return;
+    vk_pw_path(path, sizeof path);
+    if (!path[0]) return;
+    s_pw_dirty = 0;
+    snprintf(tmp, sizeof tmp, "%s.tmp", path);
+    FILE* f = fopen(tmp, "wb");
+    if (!f) return;
+    const u32 hdr[4] = { 0x4C505648u, 1u, (u32)sizeof(rsx_be_render_state), s_pw_n };
+    int ok = fwrite(hdr, sizeof hdr, 1, f) == 1;
+    for (u32 i = 0; ok && i < s_pw_n; i++) {
+        const vk_pw_recipe* R = &s_pw[i];
+        const u32 vl = (u32)strlen(R->vs), pl = (u32)strlen(R->ps);
+        const u32 w[7] = { R->topo_mask, R->nslots, R->stride, R->rt_count, (u32)R->cf, vl, pl };
+        ok = fwrite(&R->key, 8, 1, f) == 1 && fwrite(&R->rs, sizeof R->rs, 1, f) == 1 &&
+             fwrite(w, sizeof w, 1, f) == 1 && fwrite(R->vs, 1, vl, f) == vl && fwrite(R->ps, 1, pl, f) == pl;
+    }
+    fclose(f);
+    if (ok) rename(tmp, path); else remove(tmp);
+}
+
+static void vk_pw_prewarm(void)
+{
+    if (s_pw_done) return;
+    s_pw_done = 1;
+    char path[600];
+    vk_pw_path(path, sizeof path);
+    if (!vk_pw_on() || !path[0]) return;
+    FILE* f = fopen(path, "rb");
+    if (!f) return;
+    struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+    u32 hdr[4];
+    u32 built = 0, pipes = 0;
+    if (fread(hdr, sizeof hdr, 1, f) == 1 && hdr[0] == 0x4C505648u && hdr[1] == 1u &&
+        hdr[2] == (u32)sizeof(rsx_be_render_state)) {
+        for (u32 i = 0; i < hdr[3] && s_pw_n < VK_PW_MAX; i++) {
+            vk_pw_recipe* R = &s_pw[s_pw_n];
+            memset(R, 0, sizeof *R);
+            u32 w[7];
+            if (fread(&R->key, 8, 1, f) != 1 || fread(&R->rs, sizeof R->rs, 1, f) != 1 ||
+                fread(w, sizeof w, 1, f) != 1 || w[5] > (1u << 20) || w[6] > (1u << 20)) break;
+            R->topo_mask = w[0]; R->nslots = w[1]; R->stride = w[2]; R->rt_count = w[3]; R->cf = (VkFormat)w[4];
+            R->vs = (char*)malloc(w[5] + 1u); R->ps = (char*)malloc(w[6] + 1u);
+            if (!R->vs || !R->ps || fread(R->vs, 1, w[5], f) != w[5] || fread(R->ps, 1, w[6], f) != w[6]) {
+                free(R->vs); free(R->ps); break;
+            }
+            R->vs[w[5]] = 0; R->ps[w[6]] = 0;
+            if (vk_pw_find(R->key)) { free(R->vs); free(R->ps); continue; }
+            s_pw_n++;
+            vk_eng_pipe* P = &R->pre;
+            if (vk_eng_translate(R->vs, RSX_SHADER_STAGE_VERTEX, &P->vs)) continue;
+            if (vk_eng_translate(R->ps, RSX_SHADER_STAGE_FRAGMENT, &P->fs)) {
+                pvkDestroyShaderModule(s_vk.device, P->vs, NULL); memset(P, 0, sizeof *P); continue;
+            }
+            P->rs = R->rs; P->nslots = R->nslots; P->stride = R->stride; P->rt_count = R->rt_count;
+            P->rt_fmt = R->cf; P->cube_mask = vk_eng_cube_units(R->ps); P->used = 1;
+            for (u32 t = 0; t < VK_ENG_TOPOLOGIES; t++)
+                if ((R->topo_mask >> t) & 1u) { if (vk_eng_variant(P, t)) pipes++; }
+            built++;
+        }
+    }
+    fclose(f);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    VK_LOG("pipeline prewarm: %u programs, %u pipelines from %s in %.0f ms\n", built, pipes, path,
+           (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) * 1e-6);
 }
 
 static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pipeline = pipeline; }
@@ -4405,7 +4706,24 @@ static void vk_eb_release(void)
 
 static int vk_eb_active(void) { return s_eb.on == 1; }
 static u32 vk_eb_max(void) { return s_eb.max_draws; }
-static void vk_eb_recorded(void) { if (++s_eb_pending >= s_eb.max_draws) vk_eng_flush_async(); }
+/* Batch flushes at pass boundaries (HV_PASS_FLUSH=1; off by default: no fewer passes in a fight, ~25 a frame
+ * either way -- the cuts fell where the pass was closing anyway). A flush ends the
+ * command buffer and so the merged render pass, and on a tiler every pass loads and stores its whole targets:
+ * the batch cut was ~8 of a fight frame's ~25 passes. A full batch now waits for its pass to end (the next
+ * draw into another target, or anything recorded outside a pass), up to four times the size. */
+static int vk_pass_flush_on(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("HV_PASS_FLUSH") && getenv("HV_PASS_FLUSH")[0] == '1';
+    return on;
+}
+static void vk_eb_recorded(void)
+{
+    ++s_eb_pending;
+    if (s_eb_pending < s_eb.max_draws) return;
+    if (vk_pass_flush_on() && s_pass.open && s_eb_pending < 4u * s_eb.max_draws) return;
+    vk_eng_flush_async();
+}
 
 static VkDeviceSize vk_eb_take(VkDeviceSize* head, VkDeviceSize tail, VkDeviceSize cap, VkDeviceSize bytes, VkDeviceSize align);
 
@@ -4451,6 +4769,7 @@ static void vk_eb_idle_reset(void)
 
 __attribute__((noinline)) static void vk_eng_flush(void)
 {
+    vk_pcl_materialize();
     if (!s_eb_pending) {
         /* Nothing recorded: wait out the slots in flight, so the caller sees
          * everything complete, as before the asynchronous present. */
@@ -4480,6 +4799,7 @@ static void vk_eng_flush_async(void)
 {
     static int on = -1;
     if (on < 0) on = !(getenv("HV_ASYNC") && getenv("HV_ASYNC")[0] == '0');
+    vk_pcl_materialize();
     if (!s_eb_pending) return;
     if (!on || s_vk.cmd == VK_NULL_HANDLE) { vk_eng_flush(); return; }
     if (!s_slot_n) {
@@ -4509,6 +4829,7 @@ static void vk_eng_flush_async(void)
     vk_pass_close_on(s_vk.cmd);
     vk_ts_end();
     const unsigned long long te = vkt_now();
+    s_cmd_rec = 0;
     const VkResult er = pvkEndCommandBuffer(s_vk.cmd);
     vkt_add(2, te);
     if (er != VK_SUCCESS ||
@@ -4699,6 +5020,11 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
     int batched = vk_eb_on() && vbytes <= VK_EB_VB_BYTES && ibytes <= VK_EB_IB_BYTES;
     int merge = 0;          /* continues the open render pass (s_pass) */
     if (batched && P->cube_mask && !vk_eng_dummy_cube_view()) return;   /* may flush: before any slice */
+    /* A full batch held open for its pass (vk_eb_recorded): this draw starts another pass, so flush now,
+     * before any slice or set is taken from the batch. */
+    if (batched && s_eb_pending >= s_eb.max_draws &&
+        !(s_pass.open && s_pass.rp == rp && s_pass.fb == fb && s_pass.w == w && s_pass.h == h))
+        vk_eng_flush_async();
     if (batched) {
         /* Slices of the rings and a set from the pool; a full one flushes the
          * batch (which empties them all) and the draw takes its slices again. */
@@ -4750,15 +5076,38 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
         }
         if (batched && !set) batched = 0;
     }
+    u32 fold = 0;                                   /* held clears this draw's new pass takes as loadOp CLEAR */
+    VkClearValue fold_v[RSX_BE_MAX_COLOR_TARGETS + 1];
+    memset(fold_v, 0, sizeof fold_v);
     if (batched) {
         memcpy((u8*)s_eb.vb.ptr + voff, vertices, (size_t)vbytes);
         if (ibytes) memcpy((u8*)s_eb.ib.ptr + ioff, indices, (size_t)ibytes);
         vbuf = s_eb.vb.buf; ibuf = s_eb.ib.buf;
         if (!s_eb_pending && vk_begin()) return;
+        /* Held clears of this pass's whole attachments become its load ops; any other held clear is
+         * recorded by the full dependency below, so a pending one always means a new pass. */
+        const int had_pcl = s_pcl_n != 0;
+        for (u32 k = 0; k < s_pcl_n; ) {
+            const vk_pcl* c = &s_pcl[k];
+            int taken = 0;
+            if (c->w == w && c->h == h) {
+                if (!c->depth) {
+                    for (u32 i = 0; i < n && !taken; i++)
+                        if (c->obj == s_eng_bound.rt[i] && !((fold >> i) & 1u)) { fold |= 1u << i; fold_v[i] = c->v; taken = 1; }
+                } else if (dkey != 0xFFFFFFFFu && c->obj == dkey && !(fold & 0x300u)) {
+                    if (c->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) fold |= 0x100u;
+                    if (c->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) fold |= 0x200u;
+                    fold_v[n] = c->v;
+                    taken = 1;
+                }
+            }
+            if (taken) { s_pcl[k] = s_pcl[--s_pcl_n]; s_vkt_folded++; }
+            else k++;
+        }
         /* Same target as the pass still open: continue it (see s_pass) --
          * unless this draw samples one of the pass's own targets (a view of
          * a colour target, or the depth image), which needs the barrier. */
-        merge = vk_rp_merge_on() && s_pass.open && s_pass.rp == rp && s_pass.fb == fb &&
+        merge = !had_pcl && vk_rp_merge_on() && s_pass.open && s_pass.rp == rp && s_pass.fb == fb &&
                 s_pass.w == w && s_pass.h == h;
         for (u32 u = 0; merge && u < RSX_BE_MAX_TEXTURES; u++) {
             const u32 t = (s_e2.tex_mask >> u) & 1u ? s_e2.tex[u] : 0u;
@@ -4775,6 +5124,7 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
          * or blends over: order it after all of them. */
         if (!merge) vk_cmd_after_everything(s_vk.cmd);
     } else {
+        vk_pcl_materialize();
         if (s_eb_pending) vk_eng_flush();
         if (vk_ensure_vertex_buffer(vbytes)) return;
         memcpy(s_vk.vertices.ptr, vertices, (size_t)vbytes);
@@ -4798,7 +5148,14 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
         VkRenderPassBeginInfo rbi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
                                       .renderPass = rp, .framebuffer = fb,
                                       .renderArea = { { 0, 0 }, { w, h } } };
+        if (fold) {
+            const VkRenderPass crp = vk_eng_render_pass_clear(P->rt_fmt, n, fold);
+            if (crp) { rbi.renderPass = crp; rbi.clearValueCount = n + 1; rbi.pClearValues = fold_v; }
+            else VK_LOG("engine: no clearing render pass for mask 0x%x\n", fold);
+        }
         pvkCmdBeginRenderPass(s_vk.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+        s_vkt_passes++; s_vkt_pass_px += (unsigned long long)w * h;
+        s_pass_why[!s_pass.open ? 0 : (s_pass.rp != rp || s_pass.fb != fb || s_pass.w != w || s_pass.h != h) ? 1 : 2]++;
         if (batched && vk_rp_merge_on()) {
             s_pass.open = 1; s_pass.rp = rp; s_pass.fb = fb; s_pass.w = w; s_pass.h = h;
         }
@@ -5196,6 +5553,20 @@ void rsx_vulkan_backend_present(void)
                (unsigned long long)(s_vk_sync_n / dt), s_vk_sync_ns / (dt * 1e7));
         if (s_vkt_on > 0) {
             static const char* const nm[4] = { "submit", "descriptors", "end", "begin" };
+            VK_LOG("  render passes %.1f per frame (%.2f Mpx each), clears %.1f per frame\n",
+                   s_vkt_passes / (double)(n ? n : 1), s_vkt_passes ? s_vkt_pass_px / 1e6 / s_vkt_passes : 0.0,
+                   s_vkt_clears / (double)(n ? n : 1));
+            VK_LOG("  clears folded into a pass's load: %.1f per frame\n", s_vkt_folded / (double)(n ? n : 1));
+            VK_LOG("  prewarmed pipelines handed out: %llu\n", s_pw_taken);
+            s_vkt_passes = s_vkt_clears = s_vkt_pass_px = s_vkt_folded = 0;
+            VK_LOG("  new pass: none open %llu, other target %llu, samples own target %llu\n", s_pass_why[0], s_pass_why[1], s_pass_why[2]);
+            s_pass_why[0] = s_pass_why[1] = s_pass_why[2] = 0;
+            for (int i = 0; i < 16 && s_pc_sites[i].site; i++) {
+                Dl_info di;
+                const uintptr_t base = dladdr((void*)s_pc_sites[i].site, &di) ? (uintptr_t)di.dli_fbase : 0;
+                VK_LOG("  pass closed at +0x%lx: %llu\n", (unsigned long)(s_pc_sites[i].site - base), s_pc_sites[i].n);
+            }
+            memset(s_pc_sites, 0, sizeof s_pc_sites);
             VK_LOG("  descriptor sets reused %llu, written %llu\n", s_dc_hits, s_dc_miss);
             s_dc_hits = s_dc_miss = 0;
             for (int k = 0; k < 4; k++) {

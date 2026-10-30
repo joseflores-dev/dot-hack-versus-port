@@ -240,6 +240,7 @@ static struct {
 
     u8* verts;
     u64 verts_cap;
+    const u8* vptr;     /* what the draw uploads: verts, or a converted-vertex cache entry */
     u32 n_verts;
 
     /* Canonical ATTR0..15 float4 snapshots for register-based vertices.
@@ -2070,6 +2071,12 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
     }
     if (g.n_pipelines >= ENG_MAX_PIPELINES) return 0;
 
+    /* HV_PIPELOG=1: every pipeline made after boot and what it cost (decompile + backend), to tell a hitch
+     * from a first use. */
+    static int pipelog = -1;
+    if (pipelog < 0) pipelog = getenv("HV_PIPELOG") != NULL;
+    struct timespec pt0;
+    if (pipelog) clock_gettime(CLOCK_MONOTONIC, &pt0);
     u32 handle = 0;
     int vi = 1, fi = 1;
     u32 nconst = 0;
@@ -2110,6 +2117,12 @@ static u32 eng_pipeline_get(const rsx_vertex_layout_plan* layout,
     if (vi > 0 && fi > 0)
         handle = g.be->pipeline_create(g.be->user, s_vs_hlsl, s_ps_hlsl, rs,
                                        layout, layout->stride, rt_fmt, rt_count);
+    if (pipelog) {
+        struct timespec pt1; clock_gettime(CLOCK_MONOTONIC, &pt1);
+        fprintf(stderr, "[pipelog] %ld.%03ld engine pipeline #%u %s: %.2f ms\n", (long)pt1.tv_sec, pt1.tv_nsec / 1000000L,
+                g.n_pipelines + 1u, fixed ? "fixed" : "guest",
+                (pt1.tv_sec - pt0.tv_sec) * 1e3 + (pt1.tv_nsec - pt0.tv_nsec) * 1e-6);
+    }
     const u64 fp_hash = fixed ? 0 : eng_fp_debug_hash(fp_uc, fp_size);
     /* RSX_ENGINE_SHADER_DUMP=<existing dir>: each new pipeline's two programs
      * as <dir>/pipe<handle>.vs.hlsl and .ps.hlsl, the handle being the one
@@ -2319,6 +2332,146 @@ static int dc_reserve_indices(u32 count)
     return 1;
 }
 
+/* Converted-vertex cache (HV_VCACHE=1; off by default: it serves ~5-7 MB a fight frame without converting,
+ * but the RSX thread is no longer the critical path and the A/B showed no fps change). In a .hack//Versus fight
+ * ~8.6 MB of vertices a frame go through rsx_vertex_fetch_many, and ~63 % of
+ * it comes out the same as the frame before (the stage; the characters are
+ * rewritten by the SPU skinning jobs every frame). An entry is keyed by the
+ * arrays' formats and addresses and the reference list, and validated each
+ * use by a hash of the source bytes the fetch reads; it keeps converted data
+ * only once a key has shown the same source twice in a row, so geometry that
+ * changes every frame costs a hash and no copy. HV_VCACHE_LOG=1: a line every
+ * 5 s. */
+typedef struct { u64 key, src; u8* data; u32 bytes, cap; u64 used; u32 same; } vc_entry;
+#define VC_N 4096u
+#define VC_MEM_MAX (96ull << 20)
+static vc_entry s_vc[VC_N];
+static u64 s_vc_mem, s_vc_clock;
+static struct { u64 hit_bytes, store_bytes, miss; time_t t0; } s_vc_stat;
+
+static u64 vc_hash(const u8* p, size_t n, u64 seed)
+{
+    u64 h0 = seed, h1 = seed ^ 0x9E3779B97F4A7C15ull, h2 = seed ^ 0xC2B2AE3D27D4EB4Full,
+        h3 = seed ^ 0x165667B19E3779F9ull;
+    size_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+        u64 w0, w1, w2, w3;
+        memcpy(&w0, p + i, 8); memcpy(&w1, p + i + 8, 8);
+        memcpy(&w2, p + i + 16, 8); memcpy(&w3, p + i + 24, 8);
+        h0 = (h0 ^ w0) * 1099511628211ull; h1 = (h1 ^ w1) * 1099511628211ull;
+        h2 = (h2 ^ w2) * 1099511628211ull; h3 = (h3 ^ w3) * 1099511628211ull;
+    }
+    u64 h = h0 ^ (h1 * 0x9E3779B97F4A7C15ull) ^ (h2 * 0xC2B2AE3D27D4EB4Full) ^ (h3 * 0x165667B19E3779F9ull);
+    for (; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+
+static void vc_drop(vc_entry* e)
+{
+    if (e->data) { s_vc_mem -= e->cap; free(e->data); }
+    e->data = NULL; e->cap = e->bytes = 0;
+}
+
+/* Free the least recently used half of the stored data. */
+static void vc_trim(void)
+{
+    u64 lo = ~0ull, hi = 0;
+    for (u32 i = 0; i < VC_N; i++)
+        if (s_vc[i].data) {
+            if (s_vc[i].used < lo) lo = s_vc[i].used;
+            if (s_vc[i].used > hi) hi = s_vc[i].used;
+        }
+    const u64 cut = lo + (hi - lo) / 2u;
+    for (u32 i = 0; i < VC_N; i++)
+        if (s_vc[i].data && s_vc[i].used <= cut) vc_drop(&s_vc[i]);
+}
+
+/* The entry for this draw's fetch (prepared plan, refs). ->data with ->bytes
+ * means its converted vertices match the source as it is now. NULL: not a
+ * fetch this cache can vouch for. */
+static vc_entry* vc_lookup(const rsx_vertex_layout_plan* layout)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("HV_VCACHE") && getenv("HV_VCACHE")[0] == '1';
+    if (!on || !dc.n_refs) return NULL;
+    const rsx_vertex_fetch_plan* pl = &dc.fetch_plan;
+    if (pl->layout.stride != layout->stride) return NULL;
+    u64 key = eng_fnv1a(&layout->stride, sizeof layout->stride, 1469598103934665603ull);
+    key = eng_fnv1a(&pl->divider_mask, sizeof pl->divider_mask, key);
+    key = eng_fnv1a(&dc.n_refs, sizeof dc.n_refs, key);
+    u64 src = 0x2545F4914F6CDD1Dull;
+    for (u32 sl = 0; sl < pl->layout.count; sl++) {
+        const u32 a = pl->layout.attrs[sl];
+        const rsx_vertex_fetch_attr* f = &pl->attr[a];
+        key = eng_fnv1a(&a, sizeof a, key);
+        key = eng_fnv1a(&f->desc, sizeof f->desc, key);
+        key = eng_fnv1a(f->default_value, sizeof f->default_value, key);
+        if (!f->desc.type || !f->desc.size) continue;            /* the default value: nothing read */
+        if (!f->stable_base || f->desc.type < RSX_VTX_TYPE_SNORM16 || f->desc.type > RSX_VTX_TYPE_UINT8)
+            return NULL;                                          /* read element by element: not covered */
+        const u8* b = f->stable_base;
+        key = eng_fnv1a(&b, sizeof b, key);
+        key = eng_fnv1a(&f->stable_first, sizeof f->stable_first, key);
+        key = eng_fnv1a(&f->stable_last, sizeof f->stable_last, key);
+        key = eng_fnv1a(&f->stride, sizeof f->stride, key);
+        const size_t span = (size_t)(f->stable_last - f->stable_first) * f->stride + f->elem_size;
+        src = vc_hash(b, span, src);
+    }
+    key = vc_hash((const u8*)dc.refs, (size_t)dc.n_refs * sizeof *dc.refs, key);
+    if (!key) key = 1;
+    u32 at = (u32)(key ^ (key >> 31)) & (VC_N - 1u);
+    for (u32 probe = 0; probe < 16u; probe++, at = (at + 1u) & (VC_N - 1u)) {
+        vc_entry* e = &s_vc[at];
+        if (e->key && e->key != key) continue;
+        e->used = ++s_vc_clock;
+        if (!e->key) {
+            e->key = key; e->src = src; e->same = 0;
+            s_vc_stat.miss++;
+            return e;
+        }
+        if (e->src == src) {
+            if (e->same < 2u) e->same++;
+            if (e->data && e->bytes) return e;                   /* valid */
+        } else {
+            e->src = src; e->same = 0;
+            vc_drop(e);                                           /* changed: no longer worth keeping */
+        }
+        s_vc_stat.miss++;
+        return e;
+    }
+    return NULL;                                                  /* crowded: just fetch */
+}
+
+/* After a fetch: keep the converted vertices of a key whose source repeated. */
+static void vc_store(vc_entry* e, const u8* v, u32 bytes)
+{
+    if (e->same && bytes) {
+        if (!e->data || e->cap < bytes) {
+            vc_drop(e);
+            if (s_vc_mem + bytes > VC_MEM_MAX) vc_trim();
+            e->data = (u8*)malloc(bytes);
+            if (e->data) { e->cap = bytes; s_vc_mem += bytes; }
+        }
+        if (e->data) {
+            memcpy(e->data, v, bytes);
+            e->bytes = bytes;
+            s_vc_stat.store_bytes += bytes;
+        }
+    }
+    static int log = -1;
+    if (log < 0) log = getenv("HV_VCACHE_LOG") != NULL;
+    if (log) {
+        if (!s_vc_stat.t0) s_vc_stat.t0 = time(NULL);
+        if (time(NULL) - s_vc_stat.t0 >= 5) {
+            fprintf(stderr, "[vcache] 5 s: served %.1f MB, stored %.1f MB, misses %llu, held %.1f MB\n",
+                    s_vc_stat.hit_bytes / 1e6, s_vc_stat.store_bytes / 1e6,
+                    (unsigned long long)s_vc_stat.miss, s_vc_mem / 1e6);
+            s_vc_stat.hit_bytes = s_vc_stat.store_bytes = s_vc_stat.miss = 0;
+            s_vc_stat.t0 = time(NULL);
+        }
+    }
+}
+
 /* Turn this group's batches into a reference list, recording a CUT rather
  * than fetching a phantom vertex wherever the restart sentinel appears, then
  * collapse repeated references and fetch each unique vertex once.
@@ -2336,6 +2489,7 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
                 memcpy(dc.verts + (u64)v * layout->stride + slot * 16u,
                        dc.immediate[v][layout->attrs[slot]], 16u);
         dc.n_verts = dc.n_immediate;
+        dc.vptr = dc.verts;
         return;
     }
     for (u32 b = 0; b < dc.n_arr && dc.fetch_ok; b++)
@@ -2438,12 +2592,54 @@ static void dc_fetch(const rsx_vertex_layout_plan* layout, int allow_remap)
         dc.fetch_ok = 0;
         return;
     }
+    dc.vptr = dc.verts;
+    vc_entry* vc = layout->stride ? vc_lookup(layout) : NULL;
+    if (vc && vc->data && vc->bytes) {   /* the same source, converted before */
+        dc.vptr = vc->data;
+        dc.n_verts = dc.n_refs;
+        s_vc_stat.hit_bytes += vc->bytes;
+        return;
+    }
     if (!rsx_vertex_fetch_many(&dc.fetch_plan, dc.refs, dc.n_refs,
                                layout->stride ? dc.verts : NULL)) {
         dc.fetch_ok = 0;
         return;
     }
     dc.n_verts = dc.n_refs;
+    if (vc) vc_store(vc, dc.verts, (u32)((u64)dc.n_refs * layout->stride));
+    /* HV_VTXSTAT=1: how much of the converted vertex data comes out the same as the last draw from the same
+     * source (arrays and references), once every 5 s -- the case for caching converted static geometry. */
+    static int vstat = -1;
+    if (vstat < 0) vstat = getenv("HV_VTXSTAT") != NULL;
+    if (vstat && layout->stride) {
+        static struct { u64 sig, out; } tab[8192];
+        static u64 draws, bytes, same_src, same_out, b_same_src, b_same_out;
+        static time_t t0;
+        u64 sig = eng_fnv1a(&dc.n_refs, sizeof dc.n_refs, 1469598103934665603ull);
+        for (u32 sl = 0; sl < dc.fetch_plan.layout.count; sl++) {
+            const rsx_vertex_fetch_attr* fa = &dc.fetch_plan.attr[dc.fetch_plan.layout.attrs[sl]];
+            sig = eng_fnv1a(&fa->stable_base, sizeof fa->stable_base, sig);
+        }
+        sig = eng_fnv1a(dc.refs, (size_t)dc.n_refs * sizeof *dc.refs, sig);
+        const size_t nb = (size_t)dc.n_refs * layout->stride;
+        const u64 out = eng_fnv1a(dc.vptr, nb, 1469598103934665603ull);
+        u32 at = (u32)(sig ^ (sig >> 29)) & 8191u;
+        while (tab[at].sig && tab[at].sig != sig) at = (at + 1u) & 8191u;
+        draws++; bytes += nb;
+        if (tab[at].sig == sig) {
+            same_src++; b_same_src += nb;
+            if (tab[at].out == out) { same_out++; b_same_out += nb; }
+        }
+        tab[at].sig = sig; tab[at].out = out;
+        if (!t0) t0 = time(NULL);
+        if (time(NULL) - t0 >= 5) {
+            fprintf(stderr, "[vtxstat] %llu draws %.1f MB; same source %llu (%.1f MB), same output %llu (%.1f MB)%c",
+                    (unsigned long long)draws, bytes / 1e6, (unsigned long long)same_src, b_same_src / 1e6,
+                    (unsigned long long)same_out, b_same_out / 1e6, 10);
+            draws = bytes = same_src = same_out = b_same_src = b_same_out = 0;
+            t0 = time(NULL);
+        }
+    }
 }
 
 /* ---- sink ---------------------------------------------------------------- */
@@ -3391,7 +3587,7 @@ static void sink_end(void* user, const rsx_dispatch* r)
     }
 
     const u32 uploaded = indexed ? dc.n_verts : n_draw;
-    g.be->draw(g.be->user, topology, dc.verts, uploaded, layout.stride,
+    g.be->draw(g.be->user, topology, dc.vptr, uploaded, layout.stride,
                indexed ? g.indices : NULL, indexed ? n_draw : 0);
     /* Counted only when the draw ran the guest's OWN programs, which is what
      * the test hook means: a draw through the built-in pair is a draw, not
