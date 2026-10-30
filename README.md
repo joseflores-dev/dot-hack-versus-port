@@ -115,17 +115,25 @@ A text file with one `VARIABLE=value` per line, in `files/PS3/` on Android or ne
 
 ## Character mods (experimental)
 
-The port can swap a character's model for another one **as an extra colour** in the character select, leaving the
-original colours untouched. Mods are listed in `hv_mods.txt` (`files/PS3/` on Android, `data/` on Windows):
+The port can add another model to a character **as an extra colour** in the character select, leaving the original
+colours untouched.
+
+**Ready to use: Azure Kite** (from .hack//G.U. Last Recode) as Kite's colour 3. Download `azurekite-mod.zip` from
+[Releases](../../releases), copy `hv_mods.txt` and the `mods` folder to `Android/data/com.hackversus.port/files/PS3/`,
+pick Kite and go to colour 3 in "PC Colour Settings". Delete `hv_mods.txt` to remove it.
+
+Mods are shipped as patches (`.hvpatch`) that hold only what the mod changes, never data from the disc: on its first
+start the port builds the mod from your own game (under a second) and keeps the result next to the patch
+(`<patch>.built`). The list goes in `hv_mods.txt` (`files/PS3/` on Android, `data/` on Windows):
 
 ```
-# subst <model> <colour index> <carousel slot> <offset in DATA.CPK, hex> <length> <file>
-subst 1kit01 2 3 BE07800 7393184 mods/my_kite.bin
+# subst <model> <colour index> <carousel slot> <entry offset in DATA.CPK, hex> <entry length> <file>
+subst 1kit01 2 3 BE07800 7393184 mods/azurekite.hvpatch
 ```
 
-That line adds **colour 3** to Kite (carousel slot 3) and serves `mods/my_kite.bin` instead of the original model data
-when that colour is picked. The replacement must be the same size and format as the original entry in `DATA.CPK`.
-No mod files are distributed with the port. Available from APK v0.4, and on Windows when built from source.
+Kite is slot 3 of the carousel (Sora 0, Sakuya 1, Haseo 2, Kite 3, BlackRose 4, Tsukasa 5, Ovan 6, Tokio 7); colour
+index 2 is the third colour. The file can also be a ready-built entry of exactly the original size. Needs APK v0.4.1
+or later; on Windows, a build from source.
 
 ## Known issues
 

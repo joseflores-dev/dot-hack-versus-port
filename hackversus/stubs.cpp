@@ -17,6 +17,8 @@
 #include <initializer_list>
 #include <thread>
 #include <chrono>
+#include <string>
+#include <strings.h>
 
 #include "ps3emu/ps3types.h"
 #include "ps3emu/error_codes.h"
@@ -127,10 +129,11 @@ extern "C" void ps3_load_prx_modules(void)
  * -----------------------------------------------------------------------*/
 extern uint8_t* vm_base;
 extern "C" void (*g_hv_fs_read_hook)(int fd, long long pos, uint32_t buf, size_t n);
+extern "C" int ppu_fs_fd_host_path(int fd, char* out, size_t cap);
 static int replace_rows(const uint8_t* from, const uint8_t* to);
 namespace {
 struct ChrSwap { char code[16]; unsigned off, val; long long rowpos; uint8_t orig[16], repl[16], orig_abs[16], repl_abs[16]; uint32_t guest; int on; uint32_t gaddr; int colour;
-                 long long subst_at, subst_len; uint8_t* subst; int slot; };
+                 long long subst_at, subst_len; uint8_t* subst; int slot; char patch[1000]; int building; };
 ChrSwap s_swaps[16];
 int s_nswaps = -1;
 int s_chrlog = -1;
@@ -142,6 +145,205 @@ int hexbytes(const char* h, uint8_t* out)
 }
 
 void watch_setup();
+
+/* ---- mod patches (.hvpatch, descargas/mods-azurekite/make_patch.py) ----
+ * A patch holds only what the mod changes. The entry it replaces is built here from the player's own DATA.CPK the
+ * first time the title reads that file: its 128 KB chunks are unpacked (CRILAYLA), the patch's copy / insert / zero
+ * operations make the modded file, and that is packed back into the entry's format and size. The result is kept
+ * next to the patch (<patch>.built), so this happens once. */
+uint32_t crc32_of(const uint8_t* p, size_t n)
+{
+    static uint32_t t[256];
+    if (!t[1]) for (uint32_t i = 0; i < 256; i++) { uint32_t c = i; for (int k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1; t[i] = c; }
+    uint32_t c = 0xFFFFFFFFu;
+    while (n--) c = t[(c ^ *p++) & 0xFF] ^ (c >> 8);
+    return c ^ 0xFFFFFFFFu;
+}
+
+/* CRILAYLA: the first 0x100 bytes stored plain at the end; the rest coded from the last byte to the first in a bit
+ * stream read backwards (0 + 8-bit literal | 1 + 13-bit distance - 3 + length - 3 in groups of 2, 3, 5, 8, 8, ...) */
+int crilayla_unpack(const uint8_t* s, size_t n, uint8_t* out, uint32_t want)
+{
+    if (n < 16 || std::memcmp(s, "CRILAYLA", 8)) return 0;
+    uint32_t usize, hoff;
+    std::memcpy(&usize, s + 8, 4); std::memcpy(&hoff, s + 12, 4);
+    if (usize + 0x100 != want || 16 + (size_t)hoff + 0x100 > n) return 0;
+    std::memcpy(out, s + 16 + hoff, 0x100);
+    long ptr = 16 + (long)hoff - 1;
+    uint32_t pool = 0; int left = 0;
+    auto bits = [&](int k) { uint32_t v = 0; while (k) { if (!left) { pool = ptr >= 16 ? s[ptr--] : 0; left = 8; }
+                             const int t = left < k ? left : k; v = (v << t) | ((pool >> (left - t)) & ((1u << t) - 1)); left -= t; k -= t; } return v; };
+    const long end = 0x100 + (long)usize - 1;
+    long done = 0;
+    static const int vle[4] = { 2, 3, 5, 8 };
+    while (done < (long)usize) {
+        if (bits(1)) {
+            long ref = end - done + bits(13) + 3, len = 3;
+            for (int lvl = 0;; ) { const uint32_t x = bits(vle[lvl]); len += x; if (x != (1u << vle[lvl]) - 1) break; if (lvl < 3) lvl++; }
+            if (ref > end) return 0;
+            while (len-- && done < (long)usize) { out[end - done] = out[ref--]; done++; }
+        } else {
+            out[end - done] = (uint8_t)bits(8); done++;
+        }
+    }
+    return 1;
+}
+
+/* the same coder as descargas/mods-azurekite/crilayla_compress.c; returns the size written to out (0: no gain) */
+size_t crilayla_pack(const uint8_t* d, long n, uint8_t* out, size_t cap)
+{
+    if (n <= 0x100) return 0;
+    enum { WIN = 8194, HB = 16, CHAIN = 64 };
+    uint8_t* bitv = (uint8_t*)std::malloc((size_t)n * 9 + 64);
+    int32_t* head = (int32_t*)std::malloc(sizeof(int32_t) << HB);
+    int32_t* prev = (int32_t*)std::malloc(sizeof(int32_t) * (size_t)n);
+    size_t nb = 0;
+    auto put = [&](uint32_t v, int k) { for (int i = k - 1; i >= 0; i--) bitv[nb++] = (v >> i) & 1; };
+    auto H = [&](long p) { return ((((uint32_t)d[p] << 10) ^ ((uint32_t)d[p - 1] << 5) ^ d[p - 2]) & ((1u << HB) - 1)); };
+    for (int i = 0; i < 1 << HB; i++) head[i] = -1;
+    const long lo = 0x100;
+    long p = n - 1, inserted = n;
+    while (p >= lo && nb + 64 < (size_t)n * 8) {
+        while (inserted - 1 >= p + 3) { const long q = --inserted; if (q - 2 >= 0) { const uint32_t h = H(q); prev[q] = head[h]; head[h] = (int32_t)q; } }
+        long best = 0, bq = 0;
+        if (p - 2 >= lo) {
+            int32_t q = head[H(p)]; int depth = 0;
+            while (q >= 0 && q - p <= WIN && depth++ < CHAIN) {
+                long k = 0;
+                while (p - k >= lo && d[p - k] == d[q - k]) { k++; if (k >= 0x7FFF) break; }
+                if (k > best) { best = k; bq = q; }
+                q = prev[q];
+            }
+        }
+        if (best >= 3) {
+            put(1, 1); put((uint32_t)(bq - p - 3), 13);
+            long rem = best - 3; static const int vle[4] = { 2, 3, 5, 8 }; int lvl = 0;
+            for (;;) { const int b = vle[lvl]; const long mx = (1L << b) - 1; const long v = rem < mx ? rem : mx;
+                       put((uint32_t)v, b); rem -= v; if (v != mx) break; if (lvl < 3) lvl++; }
+            p -= best;
+        } else {
+            put(0, 1); put(d[p], 8); p--;
+        }
+    }
+    size_t total = 0;
+    const size_t comp = ((nb + 7) / 8 + 3) & ~(size_t)3;
+    if (p < lo && 16 + comp + 0x100 < (size_t)n && 16 + comp + 0x100 <= cap) {
+        std::memcpy(out, "CRILAYLA", 8);
+        const uint32_t usize = (uint32_t)(n - 0x100), hoff = (uint32_t)comp;
+        std::memcpy(out + 8, &usize, 4); std::memcpy(out + 12, &hoff, 4);
+        uint8_t* c = out + 16;
+        std::memset(c, 0, comp);
+        for (size_t i = 0; i < nb; i++) if (bitv[i]) c[comp - 1 - i / 8] |= (uint8_t)(1 << (7 - (int)(i % 8)));
+        std::memcpy(c + comp, d, 0x100);
+        total = 16 + comp + 0x100;
+    }
+    std::free(bitv); std::free(head); std::free(prev);
+    return total;
+}
+
+uint8_t* read_file(const char* path, size_t* n)
+{
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return nullptr;
+    std::fseek(f, 0, SEEK_END); const long sz = std::ftell(f); std::fseek(f, 0, SEEK_SET);
+    uint8_t* d = sz > 0 ? (uint8_t*)std::malloc((size_t)sz) : nullptr;
+    if (d && std::fread(d, 1, (size_t)sz, f) != (size_t)sz) { std::free(d); d = nullptr; }
+    std::fclose(f);
+    if (d) *n = (size_t)sz;
+    return d;
+}
+
+uint32_t le32(const uint8_t* p) { uint32_t v; std::memcpy(&v, p, 4); return v; }
+
+void be_put(uint8_t* p, uint64_t v, int k) { for (int i = k - 1; i >= 0; i--) { p[i] = (uint8_t)v; v >>= 8; } }
+
+/* the modded entry from the patch and the original entry; nullptr (and a log line) if anything does not match */
+uint8_t* build_from_patch(const ChrSwap& w, const uint8_t* entry)
+{
+    size_t pn = 0;
+    uint8_t* pt = read_file(w.patch, &pn);
+    if (!pt) { std::fprintf(stderr, "[mods] %s: cannot read %s\n", w.code, w.patch); return nullptr; }
+    uint8_t *src = nullptr, *dst = nullptr, *out = nullptr;
+    const char* why = nullptr;
+    do {
+        if (pn < 44 || std::memcmp(pt, "HVPATCH1", 8)) { why = "not a patch"; break; }
+        const uint32_t elen = le32(pt + 8), ecrc = le32(pt + 12), slen = le32(pt + 16), dlen = le32(pt + 20), dcrc = le32(pt + 24);
+        const uint32_t content = le32(pt + 28), align = le32(pt + 32), nch = le32(pt + 36);
+        if (elen != (uint64_t)w.subst_len) { why = "made for another entry size"; break; }
+        if (crc32_of(entry, elen) != ecrc) { why = "this DATA.CPK's entry is not the one the patch was made from"; break; }
+        const uint8_t* tb = pt + 40;
+        const uint8_t* q = tb + 16 * (size_t)nch;
+        if (q + 12 > pt + pn) { why = "truncated"; break; }
+        src = (uint8_t*)std::malloc(slen); dst = (uint8_t*)std::malloc(dlen);
+        size_t at = 0;
+        for (uint32_t i = 0; i < nch && !why; i++) {
+            const uint32_t o = le32(tb + 16 * i), fs = le32(tb + 16 * i + 4), es = le32(tb + 16 * i + 8);
+            if ((uint64_t)o + fs > elen || at + es > slen) why = "bad chunk table";
+            else if (fs < es ? !crilayla_unpack(entry + o, fs, src + at, es) : (std::memcpy(src + at, entry + o, es), 0)) why = "a chunk does not unpack";
+            at += es;
+        }
+        if (why) break;
+        const uint32_t pos_cs = le32(q), pos_eds = le32(q + 4), nops = le32(q + 8);
+        const uint8_t* op = q + 12;
+        const uint8_t* ins = op + 9 * (size_t)nops;
+        size_t t = 0;
+        for (uint32_t i = 0; i < nops && !why; i++, op += 9) {
+            const uint32_t a = le32(op + 1), len = le32(op + 5);
+            if (t + len > dlen) { why = "operations overrun"; break; }
+            if (op[0] == 0) { if ((uint64_t)a + len > slen) why = "copy out of range"; else std::memcpy(dst + t, src + a, len); }
+            else if (op[0] == 1) { if (ins + len > pt + pn) why = "truncated"; else { std::memcpy(dst + t, ins, len); ins += len; } }
+            else std::memset(dst + t, 0, len);
+            t += len;
+        }
+        if (why) break;
+        if (t != dlen || crc32_of(dst, dlen) != dcrc) { why = "the result does not check out"; break; }
+        /* pack: the original header and chunk table, then each chunk compressed (plain if that does not shrink it),
+         * aligned, in ID order; the sizes in the table follow */
+        out = (uint8_t*)std::calloc(elen, 1);
+        std::memcpy(out, entry, content);
+        size_t pos = content, data = 0, d0 = 0;
+        for (uint32_t i = 0; i < nch && !why; i++) {
+            const uint32_t es = le32(tb + 16 * i + 8), field = le32(tb + 16 * i + 12);
+            pos += (align - pos % align) % align;
+            if (pos >= elen) { why = "does not fit"; break; }
+            size_t c = crilayla_pack(dst + d0, (long)es, out + pos, elen - pos);
+            if (!c) { if (pos + es > elen) { why = "does not fit"; break; } std::memcpy(out + pos, dst + d0, es); c = es; }
+            be_put(out + field, c, 4);
+            pos += c; data += c; d0 += es;
+        }
+        if (why) break;
+        if (pos_cs != 0xFFFFFFFFu) be_put(out + pos_cs, pos - content, 8);
+        if (pos_eds != 0xFFFFFFFFu) be_put(out + pos_eds, data, 8);
+    } while (0);
+    std::free(pt); std::free(src); std::free(dst);
+    if (why) { std::fprintf(stderr, "[mods] %s: %s: %s\n", w.code, w.patch, why); std::free(out); return nullptr; }
+    return out;
+}
+
+void build_patch_thread(int i, std::string cpk)
+{
+    ChrSwap& w = s_swaps[i];
+    const auto t0 = std::chrono::steady_clock::now();
+    uint8_t* entry = (uint8_t*)std::malloc((size_t)w.subst_len);
+    FILE* f = std::fopen(cpk.c_str(), "rb");
+    #ifdef _WIN32
+    const bool sought = f && _fseeki64(f, w.subst_at, SEEK_SET) == 0;
+#else
+    const bool sought = f && fseeko(f, (off_t)w.subst_at, SEEK_SET) == 0;
+#endif
+    const bool ok = sought && entry &&
+                    std::fread(entry, 1, (size_t)w.subst_len, f) == (size_t)w.subst_len;
+    if (f) std::fclose(f);
+    uint8_t* built = ok ? build_from_patch(w, entry) : nullptr;
+    std::free(entry);
+    if (!built) { if (!ok) std::fprintf(stderr, "[mods] %s: cannot read the entry from %s\n", w.code, cpk.c_str()); return; }
+    char cache[1100];
+    std::snprintf(cache, sizeof cache, "%s.built", w.patch);
+    if (FILE* o = std::fopen(cache, "wb")) { std::fwrite(built, 1, (size_t)w.subst_len, o); std::fclose(o); }
+    __atomic_store_n(&w.subst, built, __ATOMIC_RELEASE);
+    std::fprintf(stderr, "[mods] %s: built from %s and the patch in %.1f s\n", w.code, cpk.c_str(),
+                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+}
 
 void load_mods()
 {
@@ -179,6 +381,22 @@ void load_mods()
             if (sp[0] == '/' || sp[0] == 92 || (sp[0] && sp[1] == ':')) std::snprintf(full, sizeof full, "%s", sp);
             else std::snprintf(full, sizeof full, "%s%s", dir, sp);
             FILE* b = std::fopen(full, "rb");
+            char magic[8] = {};
+            if (b && std::fread(magic, 1, 8, b) == 8 && std::memcmp(magic, "HVPATCH1", 8) == 0) {
+                /* a patch: built from the title's own DATA.CPK at its first read (or taken from an earlier build) */
+                std::fclose(b);
+                std::snprintf(w.patch, sizeof w.patch, "%s", full);
+                char cache[1100];
+                std::snprintf(cache, sizeof cache, "%s.built", full);
+                size_t n = 0;
+                uint8_t* d = read_file(cache, &n);
+                if (d && n == (size_t)w.subst_len) w.subst = d;
+                else std::free(d);
+                w.colour = 2;
+                s_swaps[s_nswaps++] = w;
+                continue;
+            }
+            if (b) std::fseek(b, 0, SEEK_SET);
             if (b) {
                 w.subst = (uint8_t*)std::malloc((size_t)w.subst_len);
                 if (w.subst && std::fread(w.subst, 1, (size_t)w.subst_len, b) == (size_t)w.subst_len) { w.colour = 2; s_swaps[s_nswaps++] = w; }
@@ -223,12 +441,23 @@ void fs_read_hook(int fd, long long pos, uint32_t buf, size_t n)
     load_mods();   /* the first game read: main() has set PS3_HDD0_ROOT by now */
     if (s_nswaps <= 0) return;
     for (int i = 0; i < s_nswaps; i++) {
+        ChrSwap& w = s_swaps[i];
+        if (!w.patch[0] || w.building || __atomic_load_n(&w.subst, __ATOMIC_ACQUIRE)) continue;
+        char host[1100];
+        const size_t hl = ppu_fs_fd_host_path(fd, host, sizeof host) ? std::strlen(host) : 0;
+        if (hl < 8 || strcasecmp(host + hl - 8, "DATA.CPK") != 0) continue;
+        w.building = 1;
+        std::fprintf(stderr, "[mods] %s: building the mod from %s\n", w.code, w.patch);
+        std::thread(build_patch_thread, i, std::string(host)).detach();
+    }
+    for (int i = 0; i < s_nswaps; i++) {
         const ChrSwap& w = s_swaps[i];
-        if (!w.subst || !w.on) continue;
+        const uint8_t* sub = __atomic_load_n(&w.subst, __ATOMIC_ACQUIRE);
+        if (!sub || !w.on) continue;
         const long long a = pos > w.subst_at ? pos : w.subst_at;
         const long long e = (pos + (long long)n) < (w.subst_at + w.subst_len) ? (pos + (long long)n) : (w.subst_at + w.subst_len);
         if (a >= e) continue;
-        std::memcpy(vm_base + buf + (a - pos), w.subst + (a - w.subst_at), (size_t)(e - a));
+        std::memcpy(vm_base + buf + (a - pos), sub + (a - w.subst_at), (size_t)(e - a));
         if (s_chrlog) std::fprintf(stderr, "[mods] %s: served +%lld, %lld bytes from the mod\n", w.code, a - w.subst_at, e - a);
     }
     if (s_chrlog && (std::getenv("HV_READLOG") || pos >= 0x80000000ll || n >= (1u << 20)))
@@ -387,7 +616,8 @@ extern "C" void hv_color_hook(uint32_t setting, uint32_t widget)
     for (int i = 0; i < s_nswaps; i++) {
         ChrSwap& w = s_swaps[i];
         if (!w.colour) continue;
-        if (w.subst && slot != w.slot && w.guest != setting) continue;   /* another character's selector */
+        if (w.colour == 2 && !__atomic_load_n(&w.subst, __ATOMIC_ACQUIRE)) continue;   /* a patch still being built */
+        if (w.colour == 2 && slot != w.slot && w.guest != setting) continue;   /* another character's selector */
         for (uint32_t f : { 0x20u, 0x28u }) {   /* +0x20 the "/NN" shown, +0x28 the bound the arrows wrap at */
             uint8_t* hi = vm_base + setting + f;
             const uint32_t cur_hi = ((uint32_t)hi[0] << 24) | (hi[1] << 16) | (hi[2] << 8) | hi[3];
@@ -400,7 +630,7 @@ extern "C" void hv_color_hook(uint32_t setting, uint32_t widget)
         const int mod = shows;
         if (mod) w.guest = setting;
         if (mod != w.on) {
-            const int n = w.subst ? 0 : replace_rows(mod ? w.orig : w.repl, mod ? w.repl : w.orig) +
+            const int n = w.colour == 2 ? 0 : replace_rows(mod ? w.orig : w.repl, mod ? w.repl : w.orig) +
                           replace_rows(mod ? w.orig_abs : w.repl_abs, mod ? w.repl_abs : w.orig_abs);
             w.on = mod;
             std::fprintf(stderr, "[mods] %s: %s (colour %u in the selector, %d copies of the index row)\n", w.code, mod ? "mod" : "original", w.val + 1, n);
@@ -437,7 +667,7 @@ extern "C" void hv_chr_path_hook(uint32_t buf, uint32_t player)
      * own textures, so the fighter takes colour 1's tint. */
     for (int i = 0; i < s_nswaps; i++) {
         const ChrSwap& w = s_swaps[i];
-        if (w.subst && std::strncmp(at, w.code, std::strlen(w.code)) == 0 && vm_base[player + 0x924] == w.val) {
+        if (w.colour == 2 && std::strncmp(at, w.code, std::strlen(w.code)) == 0 && vm_base[player + 0x924] == w.val) {
             vm_base[player + 0x924] = 0;
             if (s_chrlog) std::fprintf(stderr, "[chr]   %s: colour %u -> tint of colour 1\n", w.code, w.val + 1);
         }

@@ -478,6 +478,14 @@ static inline void fs_prefault(uint32_t buf, uint64_t len)
 extern "C" void (*g_hv_fs_read_hook)(int fd, long long pos, uint32_t buf, size_t n);
 void (*g_hv_fs_read_hook)(int fd, long long pos, uint32_t buf, size_t n) = nullptr;
 
+/* The host path of an open fd (for the hook: a mod patch is built from the file the title reads). 0 if unknown. */
+extern "C" int ppu_fs_fd_host_path(int fd, char* out, size_t cap)
+{
+    if (fd < 0 || fd >= FS_MAX || !g_fd_path[fd][0]) return 0;
+    host_path(out, cap, g_fd_path[fd]);
+    return 1;
+}
+
 static void cellFsRead(ppu_context* ctx)
 {
     int fd          = (int)(uint32_t)ctx->gpr[3];
