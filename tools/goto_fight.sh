@@ -10,5 +10,5 @@ bash "$D/goto_title.sh" "$D/../build-apk/fight_title.png" "$@" >/dev/null || { e
 sleep 3
 bash "$D/pad.sh" down:1.5 x:4 x:5 down:1.2 down:1.2 x:7
 # personaje P1, P2, menú "Start Battle", escenario, "Yes", carga
-bash "$D/pad.sh" x:4 x:5 x:5 x:6 x:5 x:35 -- "$OUT"
+bash "$D/pad.sh" x:2 x:2.5 x:2.5 x:3 x:2.5 x:30 -- "$OUT"   # P1, P2, Start Battle, escenario, Yes, carga (más rápido)
 echo "pelea tras $(( $(date +%s) - T0 )) s"

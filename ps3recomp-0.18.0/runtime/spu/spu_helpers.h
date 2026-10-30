@@ -483,21 +483,25 @@ static inline u128 spu_shufb(u128 a, u128 b, u128 c) {
 }
 #elif defined(__ARM_NEON)
 #include <arm_neon.h>
-/* NEON version: tbl over the 32-byte {a,b} concatenation. SPU byte P lives at
- * host byte P^3 (each word's bytes reversed), so rev32 into SPU order,
- * select, and rev32 back. */
+/* NEON version: tbl over the 32-byte {a,b} concatenation, in host byte order.
+ * SPU byte P lives at host byte P^3 (each word's bytes reversed), and the xor
+ * only touches the low two bits, so concat SPU byte k is host table byte k^3
+ * (a then b) and the control and result bytes keep their host positions: one
+ * eor on the index instead of four rev32 (shufb was ~23 % of the sound
+ * driver's SPU thread in a fight). Bit-identical to the reference below
+ * (tests/test_spu_shufb.c). */
 static inline u128 spu_shufb(u128 a, u128 b, u128 c) {
     uint8x16x2_t t;
-    t.val[0] = vrev32q_u8(vld1q_u8(a._u8));
-    t.val[1] = vrev32q_u8(vld1q_u8(b._u8));
-    const uint8x16_t C = vrev32q_u8(vld1q_u8(c._u8));
-    uint8x16_t r = vqtbl2q_u8(t, vandq_u8(C, vdupq_n_u8(0x1F)));
+    t.val[0] = vld1q_u8(a._u8);
+    t.val[1] = vld1q_u8(b._u8);
+    const uint8x16_t C = vld1q_u8(c._u8);
+    uint8x16_t r = vqtbl2q_u8(t, veorq_u8(vandq_u8(C, vdupq_n_u8(0x1F)), vdupq_n_u8(3)));
     /* Special selectors: 10x -> 0x00, 110 -> 0xFF, 111 -> 0x80. */
     const uint8x16_t m80 = vtstq_u8(C, vdupq_n_u8(0x80));
     const uint8x16_t mC0 = vceqq_u8(vandq_u8(C, vdupq_n_u8(0xC0)), vdupq_n_u8(0xC0));
     const uint8x16_t mE0 = vceqq_u8(vandq_u8(C, vdupq_n_u8(0xE0)), vdupq_n_u8(0xE0));
     const uint8x16_t special = vbslq_u8(mE0, vdupq_n_u8(0x80), mC0);
-    r = vrev32q_u8(vbslq_u8(m80, special, r));
+    r = vbslq_u8(m80, special, r);
     u128 out; vst1q_u8(out._u8, r); return out;
 }
 #endif
@@ -951,6 +955,10 @@ SPU__NV_INLINE u128 spu__nv_fa(u128 a, u128 b, uint32_t negb) {
 #define SPU_FPCR_RZFZ 0x01C00000ull   /* FZ (bit 24), RMode = 0b11 round toward zero (bits 22-23) */
 SPU__NV_INLINE int spu__nv_rz(void) { uint64_t v; __asm__("mrs %0, fpcr" : "=r"(v)); return v == SPU_FPCR_RZFZ; }
 SPU__NV_INLINE u128 spu__rz_fa(u128 a, u128 b, uint32_t negb) {
+#ifdef SPU_RZ_FAST   /* the bare host op: FPCR is already round toward zero + flush-to-zero; no extended range */
+    return spu__nv_u128(spu__nv_u(vaddq_f32(spu__nv_f(vld1q_u32(a._u32)),
+                                            spu__nv_f(veorq_u32(vld1q_u32(b._u32), vdupq_n_u32(negb))))));
+#endif
     const uint32x4_t x = vld1q_u32(a._u32), yb = vld1q_u32(b._u32), y = veorq_u32(yb, vdupq_n_u32(negb));
     const float32x4_t s = vaddq_f32(spu__nv_f(x), spu__nv_f(y));
     const uint32x4_t ok = spu__nv_inrange(s);
@@ -959,6 +967,9 @@ SPU__NV_INLINE u128 spu__rz_fa(u128 a, u128 b, uint32_t negb) {
     return spu__nv_u128(r);
 }
 SPU__NV_INLINE u128 spu__rz_fm(u128 a, u128 b) {
+#ifdef SPU_RZ_FAST
+    return spu__nv_u128(spu__nv_u(vmulq_f32(spu__nv_f(vld1q_u32(a._u32)), spu__nv_f(vld1q_u32(b._u32)))));
+#endif
     const uint32x4_t x = vld1q_u32(a._u32), y = vld1q_u32(b._u32);
     const uint32x4_t zp = vorrq_u32(spu__nv_z(x), spu__nv_z(y));         /* zero product */
     const float32x4_t s = vmulq_f32(spu__nv_f(x), spu__nv_f(y));
@@ -968,6 +979,11 @@ SPU__NV_INLINE u128 spu__rz_fm(u128 a, u128 b) {
     return spu__nv_u128(r);
 }
 SPU__NV_INLINE u128 spu__rz_fma(u128 a, u128 b, u128 c, uint32_t negp, uint32_t negc) {
+#ifdef SPU_RZ_FAST
+    return spu__nv_u128(spu__nv_u(vfmaq_f32(spu__nv_f(veorq_u32(vld1q_u32(c._u32), vdupq_n_u32(negc))),
+                                            spu__nv_f(veorq_u32(vld1q_u32(a._u32), vdupq_n_u32(negp))),
+                                            spu__nv_f(vld1q_u32(b._u32)))));
+#endif
     const uint32x4_t xa = vld1q_u32(a._u32), y = vld1q_u32(b._u32), zc = vld1q_u32(c._u32);
     const uint32x4_t zp = vorrq_u32(spu__nv_z(xa), spu__nv_z(y));        /* zero product */
     const uint32x4_t zi = vbicq_u32(veorq_u32(zc, vdupq_n_u32(negc)), spu__nv_z(zc));   /* zero: +0 */

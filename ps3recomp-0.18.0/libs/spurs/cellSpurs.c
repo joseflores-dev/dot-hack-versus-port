@@ -46,6 +46,7 @@ uint32_t g_ydkj_real_spurs_ea   = 0;   /* real CellSpurs instance EA (for the ta
 #include <time.h>
 #ifndef _WIN32
 #include <sched.h>
+#include <sys/resource.h>   /* setpriority: HV_JC_NICE */
 #endif
 #endif
 #include "ps3emu/thread_name.h"
@@ -2852,6 +2853,18 @@ static void jc_signal_done(u32 jc_ea, int job_index);
 static void* jc_par_worker(void* arg)
 {
     ps3_thread_name("spurs job %d", (int)(intptr_t)arg);
+#if defined(__ANDROID__)
+    /* HV_JC_CPUS=<mask> / HV_JC_NICE=<n>: where the job workers run. A fight's skinning jobs end on the title's main
+     * thread's critical path (it waits for them in cellSpursEventFlagWait, ~5 ms a frame), and left to the scheduler
+     * the workers can land on the little cores. */
+    { const char* e = getenv("HV_JC_NICE");
+      if (e) setpriority(PRIO_PROCESS, 0, atoi(e));
+      e = getenv("HV_JC_CPUS");
+      if (e) { cpu_set_t set; CPU_ZERO(&set);
+               const unsigned long m = strtoul(e, NULL, 0);
+               for (int c = 0; c < 32; c++) if (m >> c & 1ul) CPU_SET(c, &set);
+               sched_setaffinity(0, sizeof set, &set); } }
+#endif
     for (;;) {
         pthread_mutex_lock(&s_jcp.m);
         while (s_jcp.head == s_jcp.tail) pthread_cond_wait(&s_jcp.c, &s_jcp.m);
