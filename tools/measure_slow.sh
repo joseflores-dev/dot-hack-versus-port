@@ -2,7 +2,7 @@
 # measure_fight.sh + cuántos cuadros de la pelea pasaron de 37 ms (histograma "frame ms" de las mismas 6 líneas).
 # uso: tools/measure_slow.sh <etiqueta> [VAR=valor ...]
 export MSYS_NO_PATHCONV=1
-S=adb-R5CT61Z9HZA-breWSf._adb-tls-connect._tcp
+S=${HV_ADB_SERIAL:-$(adb devices | awk 'NR>1 && $2=="device"{print $1; exit}')}
 L=/sdcard/Android/data/com.hackversus.port/files/log.txt
 D="$(dirname "$0")"
 r=$(bash "$D/measure_fight.sh" "$@" 2>&1 | tail -1)

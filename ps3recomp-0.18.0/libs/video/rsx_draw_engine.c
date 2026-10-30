@@ -2252,20 +2252,32 @@ static int dc_push_index_run(const u8* run, u32 count, int is_u32, u32 base_inde
     } else {
         u32 i = 0;
 #if defined(__ARM_NEON)
-        /* Eight at a time while none of them is the restart index (the common
-         * case: a cut every few hundred indices); a block that holds one falls
-         * to the scalar loop below for those eight. */
+        /* Eight at a time; a block that holds the restart index takes the
+         * scalar steps for those eight only and the vector loop goes on (it
+         * used to stop at the first cut, and .hack//Versus strips cut every
+         * few dozen indices: most of each run went one index at a time). */
         if (restart_val <= 0xFFFFu) {
             const uint16x8_t rv = vdupq_n_u16((u16)restart_val);
             const uint32x4_t base4 = vdupq_n_u32(base_index);
-            for (; i + 8 <= count; i += 8) {
+            while (i + 8 <= count) {
                 const uint16x8_t h = vreinterpretq_u16_u8(vrev16q_u8(vld1q_u8(run + 2u * i)));
-                if (vmaxvq_u16(vceqq_u16(h, rv))) break;
+                if (vmaxvq_u16(vceqq_u16(h, rv))) {
+                    for (const u32 e = i + 8; i < e; i++) {
+                        const u32 index = (u32)((run[2u * i] << 8) | run[2u * i + 1u]);
+                        if (index == restart_val) {
+                            dc.n_refs = n;
+                            if (!rsx_restart_cut_push(&dc.cuts, &dc.n_cuts, &dc.cap_cuts, n)) return 0;
+                            continue;
+                        }
+                        out[n].vertex_id = index; out[n].base_index = base_index; n++;
+                    }
+                    continue;
+                }
                 uint32x4x2_t lo = { { vmovl_u16(vget_low_u16(h)), base4 } };
                 uint32x4x2_t hi = { { vmovl_u16(vget_high_u16(h)), base4 } };
                 vst2q_u32((u32*)&out[n], lo);
                 vst2q_u32((u32*)&out[n + 4], hi);
-                n += 8;
+                n += 8; i += 8;
             }
         }
 #endif

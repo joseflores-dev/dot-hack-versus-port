@@ -2,7 +2,7 @@
 # Llega a los monos con las VAR=valor dadas y promedia los fps de 30 s allí (6 líneas de 5 s).
 # uso: tools/measure_monos.sh <etiqueta> [VAR=valor ...]
 export MSYS_NO_PATHCONV=1
-S=adb-R5CT61Z9HZA-breWSf._adb-tls-connect._tcp
+S=${HV_ADB_SERIAL:-$(adb devices | awk 'NR>1 && $2=="device"{print $1; exit}')}
 L=/sdcard/Android/data/com.hackversus.port/files/log.txt
 TAG="$1"; shift
 D="$(dirname "$0")/.."

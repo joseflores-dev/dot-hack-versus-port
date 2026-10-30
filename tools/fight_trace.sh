@@ -3,7 +3,7 @@
 # uso: tools/fight_trace.sh <etiqueta> [VAR=valor ...]   -> frames/ft_<etiqueta>.txt y frames/ft_<etiqueta>_report.txt
 # La traza empieza a los 150 s del arranque de la app (la pelea llega a ~125 s) y dura 5 s.
 export MSYS_NO_PATHCONV=1
-S=adb-R5CT61Z9HZA-breWSf._adb-tls-connect._tcp
+S=${HV_ADB_SERIAL:-$(adb devices | awk 'NR>1 && $2=="device"{print $1; exit}')}
 TAG="$1"; shift
 D="$(dirname "$0")/.."; W=$(cd "$D" && pwd -W)
 F=/sdcard/Android/data/com.hackversus.port/files/ft.txt

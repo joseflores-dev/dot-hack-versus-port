@@ -3,7 +3,7 @@
 # uso: tools/pad.sh <boton>[:espera_s] ... [-- captura.png]
 # botones: x o t(riángulo) s(cuadrado) up down left right start select l1 r1 l2 r2
 export MSYS_NO_PATHCONV=1
-S=adb-R5CT61Z9HZA-breWSf._adb-tls-connect._tcp
+S=${HV_ADB_SERIAL:-$(adb devices | awk 'NR>1 && $2=="device"{print $1; exit}')}
 declare -A P=([x]="1350 590" [o]="1450 476" [t]="1350 360" [s]="1250 476" [up]="200 405" [down]="200 577"
               [left]="113 490" [right]="287 490" [start]="880 662" [select]="664 662"
               [l1]="116 172" [r1]="1428 172" [l2]="116 57" [r2]="1428 57")

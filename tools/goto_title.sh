@@ -4,7 +4,7 @@
 # Stereoscopic (los monos) y los avisos de guardado, que este script atraviesa (○, ✕, ✕).
 # uso: tools/goto_title.sh <captura.png> [VAR=valor ...]
 export MSYS_NO_PATHCONV=1
-S=adb-R5CT61Z9HZA-breWSf._adb-tls-connect._tcp
+S=${HV_ADB_SERIAL:-$(adb devices | awk 'NR>1 && $2=="device"{print $1; exit}')}
 OUT="$1"; shift
 D="$(dirname "$0")"
 TMP="$D/../build-apk/goto_tmp.png"

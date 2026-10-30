@@ -3,7 +3,7 @@
 # hackversus/stubs.cpp) llegue a la pantalla Stereoscopic (los monos morados). Deja la captura en el archivo indicado.
 # uso: tools/goto_monos.sh <captura.png> [VAR=valor ...]
 export MSYS_NO_PATHCONV=1
-S=adb-R5CT61Z9HZA-breWSf._adb-tls-connect._tcp
+S=${HV_ADB_SERIAL:-$(adb devices | awk 'NR>1 && $2=="device"{print $1; exit}')}
 OUT="$1"; shift
 TMP="$(dirname "$0")/../build-apk/goto_tmp.png"
 ENV=""; for kv in "$@"; do ENV="$ENV$kv\n"; done
