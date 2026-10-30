@@ -120,7 +120,8 @@ El port puede agregar otro modelo a un personaje **como un color extra** en la s
 colores originales.
 
 **Listo para usar: Azure Kite** (de .hack//G.U. Last Recode) como color 3 de Kite. Descarga `azurekite-mod.zip` de
-[Releases](../../releases), copia `hv_mods.txt` y la carpeta `mods` a `Android/data/com.hackversus.port/files/PS3/`,
+[Releases](../../releases), copia `hv_mods.txt` y la carpeta `mods` a `Android/data/com.hackversus.port/files/PS3/` (Windows: la carpeta
+`data` junto a `hackversus.exe`),
 elige a Kite y pasa al color 3 en "PC Colour Settings". Para quitarlo, borra `hv_mods.txt`.
 
 Los mods se distribuyen como parches (`.hvpatch`) que solo traen lo que el mod cambia, nunca datos del disco: en su
@@ -134,7 +135,7 @@ subst 1kit01 2 3 BE07800 7393184 mods/azurekite.hvpatch
 
 Kite es la posición 3 del carrusel (Sora 0, Sakuya 1, Haseo 2, Kite 3, BlackRose 4, Tsukasa 5, Ovan 6, Tokio 7); el
 índice de color 2 es el tercer color. El archivo también puede ser una entrada ya armada del tamaño exacto del
-original. Requiere el APK v0.4.1 o posterior; en Windows, compilar desde el código.
+original. Requiere la v0.4.1 o posterior (APK o Windows). Para hacer los tuyos, ver [tools/mods](tools/mods/README.md).
 
 ## Problemas conocidos
 
