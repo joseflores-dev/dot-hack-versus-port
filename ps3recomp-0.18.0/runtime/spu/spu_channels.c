@@ -13,6 +13,9 @@
  */
 
 #include "spu_dma.h"
+
+/* DMA recorder hook read by mfc_do_transfer; set per thread by the job runner while a job is captured. */
+SPU_DMA_TLS void (*g_spu_dma_rec)(spu_context*, uint32_t, uint32_t, uint32_t, uint32_t);
 #include "spu_coherency.h" /* lock-line lock + PPU-write coherence bitmap */
 #include "spu_helpers.h"   /* spu_splat_u32 / spu_ls_read128 (SMC microstep) */
 #include "spu_lockstep.h"

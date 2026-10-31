@@ -23,6 +23,13 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdio.h>
+
+/* Thread-local storage spelling shared with spurs_job.c / spu_channels.c (MinGW GCC ignores __declspec(thread)). */
+#if defined(_MSC_VER)
+#  define SPU_DMA_TLS __declspec(thread)
+#else
+#  define SPU_DMA_TLS __thread
+#endif
 #include "../platform/win32_compat.h"
 
 #ifdef __cplusplus
@@ -275,6 +282,10 @@ static inline int mfc_do_transfer(spu_context* spu, uint32_t lsa, uint64_t ea,
                           lsa, (uint32_t)ea, size);
               return 0;
           } } }
+    /* Per-thread DMA recorder (HV_SKINDUMP in spurs_job.c): every transfer of the
+     * job being captured, with its data. NULL outside a capture. */
+    { extern SPU_DMA_TLS void (*g_spu_dma_rec)(spu_context*, uint32_t, uint32_t, uint32_t, uint32_t);
+      if (g_spu_dma_rec) g_spu_dma_rec(spu, lsa, (uint32_t)ea, size, cmd); }
     /* SPU_DMACHK=1: report transfers that break the MFC rules the guest's own
      * dma.h asserts on -- size 0 or > 16 KB, size not a multiple of 16 for
      * transfers of 16+ bytes, or LSA/EA not sharing 16-byte alignment. */
