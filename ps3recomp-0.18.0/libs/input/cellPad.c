@@ -655,6 +655,12 @@ static void pad_poll_sdl2(void)
         s_host_state[i].analog_ly = gc ? pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_LEFTY)) : 128;
         s_host_state[i].analog_rx = gc ? pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTX)) : 128;
         s_host_state[i].analog_ry = gc ? pad_sdl_axis_to_u8(SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_RIGHTY)) : 128;
+        /* The touch d-pad also drives the left stick, as the keyboard does: the menus read the d-pad but the
+         * fights move the character with the stick only. A real stick that is pushed keeps its own value. */
+        if (TOUCH_BTN(SDL_CONTROLLER_BUTTON_DPAD_LEFT) || TOUCH_BTN(SDL_CONTROLLER_BUTTON_DPAD_RIGHT))
+            s_host_state[i].analog_lx = TOUCH_BTN(SDL_CONTROLLER_BUTTON_DPAD_LEFT) ? 0 : 255;
+        if (TOUCH_BTN(SDL_CONTROLLER_BUTTON_DPAD_UP) || TOUCH_BTN(SDL_CONTROLLER_BUTTON_DPAD_DOWN))
+            s_host_state[i].analog_ly = TOUCH_BTN(SDL_CONTROLLER_BUTTON_DPAD_UP) ? 0 : 255;
 
         /* Triggers */
         s_host_state[i].trigger_l2 = pad_sdl_trigger_to_u8(lt);
