@@ -3,8 +3,19 @@ las entradas "CPK interno" (un CPK dentro del CPK, con el archivo partido en tro
 import struct
 
 
+def utf_decrypt(buf):
+    """Tablas @UTF cifradas (CRI): XOR con una secuencia que empieza en 0x655F y se multiplica por 0x4115."""
+    out, m = bytearray(buf), 0x655F
+    for i in range(len(out)):
+        out[i] ^= m & 0xFF
+        m = (m * 0x4115) & 0xFFFFFFFF
+    return bytes(out)
+
+
 def utf_cols(buf, base_abs):
     """Tabla @UTF -> (columnas, [filas: {columna: (valor, posición absoluta, formato)}])."""
+    if buf[:4] != b'@UTF':
+        buf = utf_decrypt(buf)
     assert buf[:4] == b'@UTF', buf[:4]
     size, rows_off, strings_off, data_off, name_off, ncols, row_len, nrows = struct.unpack('>IIIIIHHI', buf[4:32])
     strings = 8 + strings_off
@@ -20,15 +31,20 @@ def utf_cols(buf, base_abs):
         name = s(struct.unpack('>I', buf[p + 1:p + 5])[0])
         p += 5
         storage, typ = flags & 0xF0, flags & 0x0F
-        if storage == 0x30:   # constante guardada en la definición de la columna
+        const = None
+        if storage & 0x20:   # valor por defecto en la definición de la columna (0x30 solo ese; 0x70 además uno por fila)
+            if typ in fmts:
+                const = struct.unpack(fmts[typ], buf[p:p + struct.calcsize(fmts[typ])])[0]
             p += struct.calcsize(fmts[typ]) if typ in fmts else (4 if typ == 0xA else 8)
-        cols.append((name, storage, typ))
+        cols.append((name, storage, typ, const))
     rows = []
     for r in range(nrows):
         p = 8 + rows_off + r * row_len
         row = {}
-        for name, storage, typ in cols:
-            if storage != 0x50:
+        for name, storage, typ, const in cols:
+            if not storage & 0x40:   # sin valor por fila: vale el de la definición
+                if const is not None:
+                    row[name] = (const, None, fmts[typ])
                 continue
             if typ in fmts:
                 n = struct.calcsize(fmts[typ])
@@ -121,10 +137,19 @@ def chunked_layout(entry):
     h = hrows[0]
     content, align, itoc = h['ContentOffset'][0], h['Align'][0], h['ItocOffset'][0]
     tbl = entry[itoc + 16:]
-    base_data = itoc + 16 + 8 + struct.unpack('>I', tbl[16:20])[0]
+    enc = tbl[:4] != b'@UTF'
+    if enc:   # tabla cifrada: se descifra entera de una vez (sus subtablas van dentro); sin posiciones para parchar
+        tbl = utf_decrypt(tbl)
+    data0 = 8 + struct.unpack('>I', tbl[16:20])[0]
     _, rows = utf_cols(tbl, itoc + 16)
-    o, n = rows[0]['DataH'][0]
-    _, chunks = utf_cols(entry[base_data + o: base_data + o + n], base_data + o)
+    chunks = []
+    for key in ('DataL', 'DataH'):   # los trozos chicos van en DataL, los de 128 KB en DataH
+        if key in rows[0]:
+            o, n = rows[0][key][0]
+            if n:
+                chunks += utf_cols(tbl[data0 + o: data0 + o + n], itoc + 16 + data0 + o)[1]
+    if enc:
+        chunks = [{k: (v[0], None, v[2]) for k, v in r.items()} for r in chunks]
     chunks.sort(key=lambda r: r['ID'][0])
     pos, table = content, []
     for r in chunks:   # seguidos desde ContentOffset, alineados, en orden de ID

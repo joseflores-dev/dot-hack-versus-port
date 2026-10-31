@@ -54,6 +54,24 @@ the same 3ds Max Biped names), keeping G.U.'s proportions and its own weights; t
 stored normals and made double-sided (G.U. draws both sides, Versus culls the back). The released Haseo 3rd Form
 mod was made that way.
 
+
+## Extra weapons (PC Costume Settings)
+
+The weapon selector can list more weapons than the title has. A "carrier" weapon of the title stays in the list and
+the extra ones are steps of the cursor right after it; while one is chosen, the carrier's file is served from its
+patch. Lines in `hv_mods.txt`:
+```
+weaponicons <offset> <64 bytes hex> <carrier's name>
+weapon <carrier> <offset hex> <length> mods/<file>.hvpatch <name>
+```
+`weapon`: the carrier's number in the title's list (`weapon_04`, Empty Skies, is 4; twin blades are 0-11), the CPK
+entry of its file (`data/weapon/wdg00.xfbin`) and the patch; one line per extra weapon, in the order they are shown.
+`weaponicons` (optional) lets each extra weapon show its own picture and name: the port finds the carrier's picture
+in the weapon pictures atlas (`csel_wpn_icon`, 1024 wide, DXT5) by those 64 bytes at `<offset>` from its start, and
+the name by its text; `<file>.icon` next to each patch is its 256x128 picture as DXT5 blocks. Without these lines
+nothing changes. The released twin blades mod (16 weapons from .hack//G.U. Vol. 3) shows Haseo, Kite, Sora and
+Sakuya the same list.
+
 ## Español
 
 Herramientas para convertir un modelo de personaje editado en un parche (`.hvpatch`) que el port agrega como un color
@@ -93,3 +111,14 @@ Para hacerlo un color de Versus, el modelo se pasa al esqueleto del luchador hue
 mismos nombres del Biped de 3ds Max), conservando las proporciones y los pesos de G.U.; los triángulos se orientan
 con las normales guardadas en el CCS y van con sus dos caras (G.U. dibuja ambas, Versus descarta la de atrás). Así
 se hizo el mod publicado de Haseo 3ª forma.
+
+### Armas extra (PC Costume Settings)
+
+El selector de armas puede mostrar más armas de las que trae el juego. Un arma del juego hace de "soporte": sigue en
+la lista y las extra son pasos del cursor justo después de ella; mientras una está elegida, el archivo del soporte se
+sirve desde su parche. Líneas de `hv_mods.txt`: `weaponicons <offset> <64 bytes hex> <nombre del soporte>` y
+`weapon <soporte> <offset hex> <largo> mods/<archivo>.hvpatch <nombre>` (una por arma extra, en el orden en que se
+muestran; el soporte es su número en la lista del juego: `weapon_04`, Empty Skies, es 4; las dagas dobles son 0-11).
+Con `weaponicons` cada arma extra muestra su imagen (`<archivo>.icon`, 256x128 en bloques DXT5) y su nombre. Sin estas
+líneas no cambia nada. El mod de dagas publicado (16 armas de .hack//G.U. Vol. 3) da la misma lista a Haseo, Kite,
+Sora y Sakuya.
