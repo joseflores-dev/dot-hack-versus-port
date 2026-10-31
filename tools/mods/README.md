@@ -69,8 +69,11 @@ entry of its file (`data/weapon/wdg00.xfbin`) and the patch; one line per extra 
 `weaponicons` (optional) lets each extra weapon show its own picture and name: the port finds the carrier's picture
 in the weapon pictures atlas (`csel_wpn_icon`, 1024 wide, DXT5) by those 64 bytes at `<offset>` from its start, and
 the name by its text; `<file>.icon` next to each patch is its 256x128 picture as DXT5 blocks. Without these lines
-nothing changes. The released twin blades mod (16 weapons from .hack//G.U. Vol. 3) shows Haseo, Kite, Sora and
-Sakuya the same list.
+nothing changes. Several carriers can be used at once, one per weapon type (twin blades 0-11, wands 12-18, guns
+19-25, swords 26-32, gloves 33-39): each fighter's selector takes the carrier of its type, and a `weaponicons` line
+belongs to the carrier of the `weapon` lines after it. Released mods: 16 twin blades from .hack//G.U. Vol. 3 on
+Empty Skies (Haseo, Kite, Sora and Sakuya get the same list) and 16 broadswords on King's Tail (`weapon_27`,
+`data/weapon/wls00.xfbin`) for Black Rose.
 
 ## Español
 
@@ -120,5 +123,8 @@ sirve desde su parche. Líneas de `hv_mods.txt`: `weaponicons <offset> <64 bytes
 `weapon <soporte> <offset hex> <largo> mods/<archivo>.hvpatch <nombre>` (una por arma extra, en el orden en que se
 muestran; el soporte es su número en la lista del juego: `weapon_04`, Empty Skies, es 4; las dagas dobles son 0-11).
 Con `weaponicons` cada arma extra muestra su imagen (`<archivo>.icon`, 256x128 en bloques DXT5) y su nombre. Sin estas
-líneas no cambia nada. El mod de dagas publicado (16 armas de .hack//G.U. Vol. 3) da la misma lista a Haseo, Kite,
-Sora y Sakuya.
+líneas no cambia nada. Se pueden usar varios soportes a la vez, uno por tipo de arma (dagas 0-11, varas 12-18,
+pistolas 19-25, espadas 26-32, guantes 33-39): el selector de cada luchador toma el soporte de su tipo, y una línea
+`weaponicons` vale para el soporte de las líneas `weapon` que la siguen. Mods publicados: 16 dagas de .hack//G.U.
+Vol. 3 sobre Empty Skies (la misma lista para Haseo, Kite, Sora y Sakuya) y 16 espadas gigantes sobre King's Tail
+(`weapon_27`, `data/weapon/wls00.xfbin`) para Black Rose.

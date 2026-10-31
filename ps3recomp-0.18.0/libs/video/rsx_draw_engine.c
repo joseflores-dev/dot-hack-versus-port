@@ -1353,6 +1353,7 @@ static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
  * cache full evicts the least recently used entry rather than returning
  * nothing: returning white "made the recovered orphanage render as flat
  * green/black geometry" (rsx_live_draw.c:2326-2334). */
+static void eng_textures_touch_pending(void);
 static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
                             u32 levels, u32 pitch, int cube, u32 remap, u32 depth)
 {
@@ -1362,6 +1363,7 @@ static u32 eng_texture_slot(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
                                : eng_texture_span(fmt, w, h, levels, pitch, cube);
     if (!span) return 0;
 
+    eng_textures_touch_pending();
     /* A scene binds the same few hundred textures every frame, and a linear
      * scan of the whole cache per bind averaged several hundred entries.
      * Remember where each key was last found; a remembered slot is used only
@@ -1484,6 +1486,44 @@ static void eng_textures_touch(u32 location, u32 offset, u32 bytes)
             e->last_hash_frame = g.frames - 1u;
             e->last_full_frame = g.frames - ENG_TEXHASH_FULL_EVERY;   /* hash it all */
             e->rewritten = 1;
+        }
+    }
+}
+
+/* Writes to guest memory the engine cannot see (the port's mods rewriting part of a texture -- a weapon picture
+ * in the weapon pictures atlas): rsx_draw_engine_touch_ea() from any thread queues the byte range, and the next
+ * texture lookup on the RSX thread re-hashes in full every cached texture that overlaps it, so the change shows
+ * on the next frame rather than when the texture's turn for a full hash comes (HV_TEXHASH_FULL_EVERY frames). */
+#define ENG_TOUCH_RING 16u
+static struct { volatile u32 ea, bytes; } s_touch_ring[ENG_TOUCH_RING];
+static volatile u32 s_touch_seq;
+static u32 s_touch_done;
+void rsx_draw_engine_touch_ea(u32 ea, u32 bytes)
+{
+    const u32 k = s_touch_seq;
+    s_touch_ring[k % ENG_TOUCH_RING].ea = ea;
+    s_touch_ring[k % ENG_TOUCH_RING].bytes = bytes;
+    __atomic_store_n(&s_touch_seq, k + 1u, __ATOMIC_RELEASE);
+}
+static void eng_textures_touch_pending(void)
+{
+    const u32 seq = __atomic_load_n(&s_touch_seq, __ATOMIC_ACQUIRE);
+    if (seq == s_touch_done) return;
+    if (seq - s_touch_done > ENG_TOUCH_RING) s_touch_done = seq - ENG_TOUCH_RING;
+    for (; s_touch_done != seq; s_touch_done++) {
+        const u32 ea = s_touch_ring[s_touch_done % ENG_TOUCH_RING].ea;
+        const u32 bytes = s_touch_ring[s_touch_done % ENG_TOUCH_RING].bytes;
+        if (!vm_base || !bytes) continue;
+        const u8* a = vm_base + ea;
+        for (u32 i = 0; i < g.n_textures; i++) {
+            eng_texture* e = &g.textures[i];
+            const u32 span = e->depth > 1
+                ? eng_texture_span_3d(e->format, e->width, e->height, e->depth, e->levels, e->pitch)
+                : eng_texture_span(e->format, e->width, e->height, e->levels, e->pitch, (int)e->cubemap);
+            const u8* t = span ? eng_guest_ptr(NULL, e->location, e->offset, span) : NULL;
+            if (!t || t >= a + bytes || a >= t + span) continue;
+            e->last_hash_frame = g.frames - 1u;
+            e->last_full_frame = g.frames - ENG_TEXHASH_FULL_EVERY;
         }
     }
 }

@@ -130,6 +130,7 @@ extern "C" void ps3_load_prx_modules(void)
 extern uint8_t* vm_base;
 extern "C" void (*g_hv_fs_read_hook)(int fd, long long pos, uint32_t buf, size_t n);
 extern "C" int ppu_fs_fd_host_path(int fd, char* out, size_t cap);
+extern "C" void rsx_draw_engine_touch_ea(uint32_t ea, uint32_t bytes);
 static int replace_rows(const uint8_t* from, const uint8_t* to);
 namespace {
 /* colour: 0 swap/swapg, 1 swapc, 2 subst (a character's extra colour), 3 weapon (an extra weapon on a carrier) */
@@ -138,9 +139,12 @@ struct ChrSwap { char code[16]; unsigned off, val; long long rowpos; uint8_t ori
                  uint8_t* icon; int icon_tried; };
 enum { MAX_SWAPS = 64 };
 ChrSwap s_swaps[MAX_SWAPS];
-uint8_t s_icon_sig[64];          /* "weaponicons": the carrier's picture and name (hv_weapon_hook) */
-int s_icon_rel = -1;
-char s_icon_name[48];
+/* "weaponicons": a carrier's picture and name (hv_weapon_hook), one per carrier of extra weapons */
+struct WeaponIcons { int carrier; uint8_t sig[64]; int rel; char name[48];
+                     int ncell, nname, shown; uint32_t cell[4], namea[8]; int cap[8]; uint8_t* orig; };
+enum { MAX_CARRIERS = 4 };
+WeaponIcons s_icons[MAX_CARRIERS];
+int s_nicons;
 int s_nswaps = -1;
 int s_chrlog = -1;
 
@@ -374,7 +378,8 @@ void load_mods()
     std::snprintf(dir, sizeof dir, "%s", path);
     { char* sl = std::strrchr(dir, '/'); char* bs = std::strrchr(dir, 92); if (bs > sl) sl = bs; if (sl) sl[1] = 0; else dir[0] = 0; }
     char line[512];
-    unsigned nweapons = 0;
+    unsigned nweapons[MAX_CARRIERS] = {}; int carriers[MAX_CARRIERS], ncarriers = 0;
+    int icons_pending = -1;   /* a "weaponicons" line belongs to the carrier of the "weapon" lines after it */
     while (s_nswaps < MAX_SWAPS && std::fgets(line, sizeof line, f)) {
         ChrSwap w = {};
         /* "weapon <carrier> <offset hex> <length> <file.hvpatch> <name>": one more weapon in the PC Costume Settings
@@ -387,8 +392,14 @@ void load_mods()
          * <offset> from the start of the carrier's picture, and the carrier's name as the title keeps it in memory. */
         unsigned rel = 0; char sig[160] = {}, nm[48] = {};
         if (std::sscanf(line, "weaponicons %u %159s %47[^\r\n]", &rel, sig, nm) == 3 && std::strlen(sig) == 128) {
-            for (int i = 0; i < 64; i++) { unsigned v; std::sscanf(sig + 2 * i, "%2x", &v); s_icon_sig[i] = (uint8_t)v; }
-            s_icon_rel = rel; std::snprintf(s_icon_name, sizeof s_icon_name, "%s", nm);
+            if (s_nicons < MAX_CARRIERS) {
+                WeaponIcons& ic = s_icons[s_nicons];
+                ic = {};
+                ic.carrier = -1;
+                for (int i = 0; i < 64; i++) { unsigned v; std::sscanf(sig + 2 * i, "%2x", &v); ic.sig[i] = (uint8_t)v; }
+                ic.rel = (int)rel; std::snprintf(ic.name, sizeof ic.name, "%s", nm);
+                icons_pending = s_nicons++;
+            }
             continue;
         }
         char wfile[400];
@@ -397,8 +408,12 @@ void load_mods()
             if (wfile[0] == '/' || wfile[0] == 92 || (wfile[0] && wfile[1] == ':')) std::snprintf(full, sizeof full, "%s", wfile);
             else std::snprintf(full, sizeof full, "%s%s", dir, wfile);
             std::snprintf(w.patch, sizeof w.patch, "%s", full);
-            std::snprintf(w.code, sizeof w.code, "weapon %u", ++nweapons);
-            w.val = nweapons;
+            int ci = 0;
+            while (ci < ncarriers && carriers[ci] != w.slot) ci++;
+            if (ci == ncarriers) { if (ncarriers == MAX_CARRIERS) continue; carriers[ncarriers++] = w.slot; }
+            if (icons_pending >= 0) { s_icons[icons_pending].carrier = w.slot; icons_pending = -1; }
+            std::snprintf(w.code, sizeof w.code, "weapon %d.%u", w.slot, ++nweapons[ci]);
+            w.val = nweapons[ci];   /* its step on the carrier: 1, 2, ... */
             w.colour = 3;
             char cache[1100];
             std::snprintf(cache, sizeof cache, "%s.built", full);
@@ -732,16 +747,28 @@ namespace {
 uint32_t rd32(uint32_t a) { const uint8_t* p = vm_base + a; return ((uint32_t)p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]; }
 void wr32(uint32_t a, uint32_t v) { uint8_t* p = vm_base + a; p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16); p[2] = (uint8_t)(v >> 8); p[3] = (uint8_t)v; }
 int weapon_group(int n) { static const int lo[] = { 0, 12, 19, 26, 33, 40 }; for (int g = 0; g < 5; g++) if (n >= lo[g] && n < lo[g + 1]) return g; return -1; }
-struct WeaponSel { uint32_t setting; int prev, step; };   /* step: 0 the carrier itself, k the k-th extra weapon */
+struct WeaponSel { uint32_t setting; int carrier, prev, step; };   /* step: 0 the carrier itself, k the k-th extra */
 WeaponSel s_wsel[4];
 
-int weapon_carrier(int* count)
+/* the carriers of the "weapon" lines, in order, and how many extra weapons each one has */
+int weapon_carriers(int* out, int* counts)
 {
-    int c = -1, k = 0;
-    for (int i = 0; i < s_nswaps; i++)
-        if (s_swaps[i].colour == 3 && (c < 0 || s_swaps[i].slot == c)) { c = s_swaps[i].slot; k++; }
-    *count = k;
-    return c;
+    int n = 0;
+    for (int i = 0; i < s_nswaps; i++) {
+        if (s_swaps[i].colour != 3) continue;
+        int j = 0;
+        while (j < n && out[j] != s_swaps[i].slot) j++;
+        if (j == n) { if (n == MAX_CARRIERS) continue; out[n] = s_swaps[i].slot; counts[n++] = 0; }
+        counts[j]++;
+    }
+    return n;
+}
+
+int weapon_count(int carrier)
+{
+    int k = 0;
+    for (int i = 0; i < s_nswaps; i++) if (s_swaps[i].colour == 3 && s_swaps[i].slot == carrier) k++;
+    return k;
 }
 
 int weapon_locked(uint32_t setting, int n)
@@ -769,39 +796,41 @@ int weapon_list(uint32_t setting, int carrier, int* out, int cap)
 
 uint32_t s_wshow_owner;   /* the selector whose cursor moved last: the shared picture and name follow it */
 
-/* The picture (in the weapon pictures atlas) and the name (in the title's text) the selector shows for the carrier:
+/* The picture (in the weapon pictures atlas) and the name (in the title's text) the selector shows for a carrier:
  * an extra weapon's own while one is chosen (step k), the carrier's again at step 0. Both are found in the guest
- * memory the first time ("weaponicons" line) and the originals kept. */
-void weapon_show(int step)
+ * memory the first time ("weaponicons" line of that carrier) and the originals kept. The atlas is a big texture the
+ * renderer only re-hashes in full every few frames: it is told about the rewrite (rsx_draw_engine_touch_ea), so the
+ * new picture shows on the next frame. */
+void weapon_show(int carrier, int step)
 {
-    static int ncell, nname, shown;
-    static uint32_t cell[4], name[8];
-    static int cap[8];
-    static uint8_t orig_cell[32 * 1024];
-    if (s_icon_rel < 0 || step == shown) return;
-    if (!ncell) {
+    WeaponIcons* ic = nullptr;
+    for (int i = 0; i < s_nicons; i++) if (s_icons[i].carrier == carrier) ic = &s_icons[i];
+    if (!ic || step == ic->shown) return;
+    if (!ic->ncell) {
         uint32_t m[4];
-        const int k = guest_find(s_icon_sig, 64, m, 4);
-        for (int i = 0; i < k; i++) cell[ncell++] = m[i] - (uint32_t)s_icon_rel;
-        if (!ncell) { if (s_chrlog) std::fprintf(stderr, "[weapon] the weapon pictures are not in memory yet\n"); return; }
-        for (int r = 0; r < 32; r++) std::memcpy(orig_cell + r * 1024, vm_base + cell[0] + r * 4096, 1024);
-        const size_t L = std::strlen(s_icon_name);
+        const int k = guest_find(ic->sig, 64, m, 4);
+        for (int i = 0; i < k; i++) ic->cell[ic->ncell++] = m[i] - (uint32_t)ic->rel;
+        if (!ic->ncell) { if (s_chrlog) std::fprintf(stderr, "[weapon] the weapon pictures are not in memory yet\n"); return; }
+        if (!ic->orig) ic->orig = (uint8_t*)std::malloc(32 * 1024);
+        for (int r = 0; r < 32; r++) std::memcpy(ic->orig + r * 1024, vm_base + ic->cell[0] + r * 4096, 1024);
+        const size_t L = std::strlen(ic->name);
         uint8_t pat[64];
-        std::memcpy(pat, s_icon_name, L); pat[L] = 0;
+        std::memcpy(pat, ic->name, L); pat[L] = 0;
         uint32_t nm[8];
         const int q = guest_find(pat, L + 1, nm, 8);
         for (int i = 0; i < q; i++) {   /* room for a longer name: the zeros after it */
             int z = 0;
             while (z < 32 && vm_base[nm[i] + L + z] == 0) z++;
-            name[nname] = nm[i]; cap[nname++] = (int)L + z - 1;
+            ic->namea[ic->nname] = nm[i]; ic->cap[ic->nname++] = (int)L + z - 1;
         }
-        if (s_chrlog) std::fprintf(stderr, "[weapon] carrier picture found %d time(s) (0x%08X), its name %d time(s)\n", ncell, cell[0], nname);
+        if (s_chrlog) std::fprintf(stderr, "[weapon] carrier %d: picture found %d time(s) (0x%08X), its name %d time(s)\n",
+                                   carrier, ic->ncell, ic->cell[0], ic->nname);
     }
-    const uint8_t* pic = orig_cell;
-    const char* text = s_icon_name;
+    const uint8_t* pic = ic->orig;
+    const char* text = ic->name;
     for (int i = 0; step > 0 && i < s_nswaps; i++) {
         ChrSwap& w = s_swaps[i];
-        if (w.colour != 3 || (int)w.val != step) continue;
+        if (w.colour != 3 || w.slot != carrier || (int)w.val != step) continue;
         if (!w.icon && !w.icon_tried) {   /* <file>.icon next to <file>.hvpatch */
             w.icon_tried = 1;
             char p[1100];
@@ -810,42 +839,50 @@ void weapon_show(int step)
             if (dot) std::strcpy(dot, ".icon");
             size_t n = 0;
             uint8_t* d = read_file(p, &n);
-            if (d && n == sizeof orig_cell) w.icon = d; else std::free(d);
+            if (d && n == 32 * 1024) w.icon = d; else std::free(d);
         }
         if (w.icon) pic = w.icon;
         if (w.name[0]) text = w.name;
     }
-    for (int c = 0; c < ncell; c++)
-        for (int r = 0; r < 32; r++) std::memcpy(vm_base + cell[c] + r * 4096, pic + r * 1024, 1024);
-    for (int i = 0; i < nname; i++) {
-        const int len = (int)std::strlen(text), n = len < cap[i] ? len : cap[i];
-        std::memset(vm_base + name[i], 0, (size_t)cap[i] + 1);
-        std::memcpy(vm_base + name[i], text, (size_t)n);
+    for (int c = 0; c < ic->ncell; c++) {
+        for (int r = 0; r < 32; r++) std::memcpy(vm_base + ic->cell[c] + r * 4096, pic + r * 1024, 1024);
+        rsx_draw_engine_touch_ea(ic->cell[c], 31 * 4096 + 1024);
     }
-    shown = step;
+    for (int i = 0; i < ic->nname; i++) {
+        const int len = (int)std::strlen(text), n = len < ic->cap[i] ? len : ic->cap[i];
+        std::memset(vm_base + ic->namea[i], 0, (size_t)ic->cap[i] + 1);
+        std::memcpy(vm_base + ic->namea[i], text, (size_t)n);
+        rsx_draw_engine_touch_ea(ic->namea[i], (uint32_t)ic->cap[i] + 1);
+    }
+    ic->shown = step;
 }
 
-WeaponSel* weapon_sel(uint32_t setting)
+WeaponSel* weapon_sel(uint32_t setting, int carrier)
 {
-    for (WeaponSel& s : s_wsel) if (s.setting == setting) return &s;
-    for (WeaponSel& s : s_wsel) if (!s.setting) { s = { setting, -1, 0 }; return &s; }
-    s_wsel[0] = { setting, -1, 0 };
+    for (WeaponSel& s : s_wsel) if (s.setting == setting) { s.carrier = carrier; return &s; }
+    for (WeaponSel& s : s_wsel) if (!s.setting) { s = { setting, carrier, -1, 0 }; return &s; }
+    s_wsel[0] = { setting, carrier, -1, 0 };
     return &s_wsel[0];
 }
 }
 
-/* a weapon selector's setting object, for a fighter of the carrier's type (some other weapon of that type is in its
- * list): from then on hv_weapon_available keeps the carrier in the list */
-WeaponSel* weapon_register(uint32_t setting, int c)
+/* a weapon selector's setting object, for a fighter of a carrier's type (some other weapon of that type is in its
+ * list): from then on hv_weapon_available keeps that carrier in the list */
+WeaponSel* weapon_register(uint32_t setting)
 {
     WeaponSel* s = weapon_known(setting);
     if (!s) {
-        const int g = weapon_group(c);
-        int same = 0;
-        for (int i = 0; i < 40; i++) if (i != c && weapon_group(i) == g && !weapon_locked(setting, i)) same = 1;
-        if (!same) return nullptr;
-        s = weapon_sel(setting);
+        int cs[MAX_CARRIERS], ks[MAX_CARRIERS];
+        const int nc = weapon_carriers(cs, ks);
+        for (int j = 0; j < nc && !s; j++) {
+            const int g = weapon_group(cs[j]);
+            int same = 0;
+            for (int i = 0; i < 40; i++) if (i != cs[j] && weapon_group(i) == g && !weapon_locked(setting, i)) same = 1;
+            if (same) s = weapon_sel(setting, cs[j]);
+        }
+        if (!s) return nullptr;
     }
+    const int c = s->carrier;
     /* the cursor (func_00249FC4) wraps past +0x28, the highest weapon in the list when the menu opened */
     if ((int)rd32(setting + 0x28) < c) {
         wr32(setting + 0x28, (uint32_t)c);
@@ -866,11 +903,10 @@ extern "C" void hv_weapon_hook(uint32_t setting, uint32_t widget)
 {
     (void)widget;
     load_mods();
-    int k = 0;
-    const int c = weapon_carrier(&k);
-    if (c < 0 || !setting) return;
-    WeaponSel* s = weapon_register(setting, c);
+    if (!setting) return;
+    WeaponSel* s = weapon_register(setting);
     if (!s) return;
+    const int c = s->carrier, k = weapon_count(c);
     int list[64];
     const int n = weapon_list(setting, c, list, 64);
     int at = -1;
@@ -881,19 +917,23 @@ extern "C" void hv_weapon_hook(uint32_t setting, uint32_t widget)
         const int after = list[(at + 1) % n], before = list[(at + n - 1) % n];
         if (s->prev == c && cur == after && s->step < k) { s->step++; wr32(setting + 0x1C, (uint32_t)c); }
         else if (s->prev == c && cur == before && s->step > 0) { s->step--; wr32(setting + 0x1C, (uint32_t)c); }
-        else if (cur == c) s->step = s->prev == after ? k : 0;   /* came back from the weapon after the extra ones */
+        /* came back from the weapon after the extra ones: enter at the end. With only two weapons in the list the
+         * one after the carrier is also the one before it: then the direction is told by the numbers (moving on
+         * from a lower number enters at the start) */
+        else if (cur == c) s->step = s->prev == after && (after != before || s->prev > c) ? k : 0;
         else s->step = 0;
         s->prev = (int)rd32(setting + 0x1C);
         s_wshow_owner = setting;
         if (s_chrlog) std::fprintf(stderr, "[weapon] setting 0x%08X: weapon %d, extra %d of %d\n", setting, s->prev, s->prev == c ? s->step : 0, k);
     }
-    if (s_wshow_owner == setting) weapon_show(s->prev == c ? s->step : 0);
-    /* the carrier's file is served from the extra weapon a player has on (the last one chosen wins if both differ) */
+    if (s_wshow_owner == setting) weapon_show(c, s->prev == c ? s->step : 0);
+    /* a carrier's file is served from the extra weapon a player has on (the last one chosen wins if both differ) */
     for (int i = 0; i < s_nswaps; i++) {
         ChrSwap& w = s_swaps[i];
         if (w.colour != 3) continue;
         int on = 0;
-        for (const WeaponSel& q : s_wsel) if (q.setting && q.prev == c && q.step == (int)w.val) on = 1;
+        for (const WeaponSel& q : s_wsel)
+            if (q.setting && q.carrier == w.slot && q.prev == w.slot && q.step == (int)w.val) on = 1;
         if (on != w.on) {
             w.on = on;
             if (s_chrlog) std::fprintf(stderr, "[weapon] %s (%s): %s\n", w.code, w.name, on ? "on" : "off");
@@ -901,29 +941,29 @@ extern "C" void hv_weapon_hook(uint32_t setting, uint32_t widget)
     }
 }
 
-/* func_0024914C(setting, n): is weapon n in the selector's list. For a weapon selector hv_weapon_hook has seen, the
- * carrier of the extra weapons is (it may still be locked in the save). -1: the title's own answer. */
+/* func_0024914C(setting, n): is weapon n in the selector's list. For a weapon selector hv_weapon_hook has seen, its
+ * carrier of extra weapons is (it may still be locked in the save). -1: the title's own answer. */
 extern "C" int hv_weapon_available(uint32_t setting, int n, uint32_t caller)
 {
     if (s_nswaps <= 0) return -1;
-    int k = 0;
-    const int c = weapon_carrier(&k);
-    if (c < 0 || n != c) return -1;
+    if (!weapon_count(n)) return -1;   /* not a carrier */
     /* the weapon selector's own questions (counting its weapons, moving the cursor, drawing): func_0028F64C,
      * func_00290xxx and func_0028F8E8 ask with its setting object -- known from the first one */
+    WeaponSel* s;
     if (caller == 0x0028F698u || caller == 0x002900F4u || caller == 0x002903F8u || caller == 0x0028F978u)
-        return weapon_register(setting, c) ? 1 : -1;
-    return weapon_known(setting) ? 1 : -1;
+        s = weapon_register(setting);
+    else
+        s = weapon_known(setting);
+    return s && s->carrier == n ? 1 : -1;
 }
 
 /* the "NN/NN" the selector draws: position and count with the extra weapons in */
 extern "C" void hv_weapon_numbers(uint32_t setting, uint64_t* pos, uint64_t* count)
 {
-    int k = 0;
-    const int c = weapon_carrier(&k);
-    if (c < 0 || !setting) return;
+    if (!setting) return;
     WeaponSel* s = weapon_known(setting);
     if (!s) return;
+    const int c = s->carrier, k = weapon_count(c);
     int list[64];
     const int n = weapon_list(setting, c, list, 64);
     int at = -1, now = -1;

@@ -358,6 +358,8 @@ void rsx_draw_engine_note_flip(u32 buffer_id);
  * out with the same pitch take part; anything else is left alone. */
 void rsx_draw_engine_guest_read(u32 location, u32 offset, u32 pitch, u32 w, u32 h);
 void rsx_draw_engine_guest_wrote(u32 location, u32 offset, u32 pitch, u32 w, u32 h);
+/* guest bytes [ea, ea+bytes) rewritten outside the title (any thread): textures over them re-checked next use */
+void rsx_draw_engine_touch_ea(u32 ea, u32 bytes);
 
 /* --- test hooks ---------------------------------------------------------- */
 
