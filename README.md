@@ -31,7 +31,8 @@ reproduced on Vulkan.
 | Fights | Steady 30 fps (the game's cap), battery saver on | Steady 30 fps |
 | Menus, saving, sound | Yes | Yes |
 | Controllers | Bluetooth (DualShock 4 and compatibles) + on-screen touch pad | Any SDL controller + keyboard |
-| Story Mode, online | Not played through / no online | Same |
+| Story Mode | Yes | Yes |
+| Online | No | No |
 
 Tested on a Samsung Galaxy S22 Ultra (Snapdragon 8 Gen 1, Android 16) and a Windows 10 PC (Ryzen 7 5700X3D,
 RTX 3050). Bug reports and pull requests are welcome.

@@ -31,7 +31,8 @@ reproduce sobre Vulkan.
 | Peleas | 30 fps estables (el tope del juego), con ahorro de batería | 30 fps estables |
 | Menús, guardado, sonido | Sí | Sí |
 | Mandos | Bluetooth (DualShock 4 y compatibles) + pad táctil en pantalla | Cualquier mando de SDL + teclado |
-| Story Mode, online | Sin recorrer entero / sin online | Igual |
+| Story Mode | Sí | Sí |
+| Online | No | No |
 
 Probado en un Samsung Galaxy S22 Ultra (Snapdragon 8 Gen 1, Android 16) y en un PC con Windows 10 (Ryzen 7 5700X3D,
 RTX 3050). Los informes de fallos y los pull requests son bienvenidos.
