@@ -37,6 +37,23 @@ Needs Python 3.
 
 The new colour has no tint of its own: the model's textures are used as they are.
 
+
+## Models from .hack//G.U. (PS2)
+
+`gu/` reads the character models of the PS2 G.U. games (CCS files) and exports them as OBJ + PNG in their rest pose:
+```
+python tools/mods/gu/export_obj.py <file.ccs> <out_folder>
+```
+The CCS files are in the disc's `DATA/DATA.CVM` (a CRI ROFS image: a 0x1800-byte header followed by a plain ISO9660
+image), each one gzip-compressed. Haseo's 3rd form in Vol. 3 Redemption is `/SPC/EV/1HSW03.CCS` (cutscene model).
+`gu/ccs.py` is the reader (format notes from NCDyson's StudioCCS, checked against the Redemption files). Bones use
+row vectors, degrees, rotation order Z·Y·X, in cm; vertices are s16 · scale/256 / 16 in bone units; Z is up.
+
+To turn such a model into a Versus colour, it goes onto the Versus fighter's skeleton bone by bone (both games use
+the same 3ds Max Biped names), keeping G.U.'s proportions and its own weights; triangles are faced by the CCS's
+stored normals and made double-sided (G.U. draws both sides, Versus culls the back). The released Haseo 3rd Form
+mod was made that way.
+
 ## Español
 
 Herramientas para convertir un modelo de personaje editado en un parche (`.hvpatch`) que el port agrega como un color
@@ -62,3 +79,17 @@ de cada jugador. Hace falta Python 3.
    `HV_CHRLOG=1` en `hv_env.txt` el log muestra lo que hacen los mods.
 
 El color nuevo no tiene tinte propio: se usan las texturas del modelo tal cual.
+
+### Modelos de .hack//G.U. (PS2)
+
+`gu/` lee los modelos de personajes de los G.U. de PS2 (archivos CCS) y los exporta a OBJ + PNG en su pose de reposo:
+`python tools/mods/gu/export_obj.py <archivo.ccs> <carpeta_salida>`.
+Los CCS están en `DATA/DATA.CVM` del disco (imagen ROFS de CRI: cabecera de 0x1800 bytes y luego un ISO9660 normal),
+cada uno comprimido con gzip. Haseo 3ª forma en Vol. 3 Redemption es `/SPC/EV/1HSW03.CCS` (modelo de escenas).
+`gu/ccs.py` es el lector (formato según StudioCCS de NCDyson, comprobado con los archivos de Redemption). Huesos:
+vector fila, grados, orden Z·Y·X, en cm; vértices = s16 · escala/256 / 16 en unidades de hueso; Z hacia arriba.
+
+Para hacerlo un color de Versus, el modelo se pasa al esqueleto del luchador hueso por hueso (los dos juegos usan los
+mismos nombres del Biped de 3ds Max), conservando las proporciones y los pesos de G.U.; los triángulos se orientan
+con las normales guardadas en el CCS y van con sus dos caras (G.U. dibuja ambas, Versus descarta la de atrás). Así
+se hizo el mod publicado de Haseo 3ª forma.
