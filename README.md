@@ -148,14 +148,15 @@ or later (Windows: v0.4.1 or later). To make your own, see [tools/mods](tools/mo
 
 ## Building from source
 
-Everything lives in the project folder; nothing is installed system-wide.
+Nothing is installed system-wide. The toolchains live in one folder shared with other ports, by default
+`C:\git-personal\toolchains` (override with `HV_TOOLCHAINS`, and the Android sysroot with `HV_SYSROOT_ANDROID`).
 
 <details>
 <summary>Build steps</summary>
 
-1. **Toolchain** (not included): Android NDK r30, CMake ≥ 3.28, Ninja, JDK 17, build-tools 35.0.1 and the API 35
-   `android.jar`, Python 3.10 with `pip install -r ps3recomp-0.18.0/requirements.txt`, and SDL2 + glslang for
-   `arm64-v8a` in `sysroot/`.
+1. **Toolchain** (not included), in the toolchains folder: Android NDK r30, CMake ≥ 3.28, Ninja, JDK 17,
+   build-tools 35.0.1 and the API 35 `android.jar`, and SDL2 + glslang for `arm64-v8a` in `sysroot-android/`. In the
+   project: Python 3.10 in `.venv/` with `pip install -r ps3recomp-0.18.0/requirements.txt`.
 2. **Lift the game** once (`game/EBOOT.ELF` is the decrypted executable, e.g. dumped by an emulator):
    ```
    P=.venv/Scripts/python; R=ps3recomp-0.18.0/tools
@@ -170,7 +171,7 @@ Everything lives in the project folder; nothing is installed system-wide.
    (`tools/apply_recomp_hooks.py`) before compiling.
    Releases use a profile-guided build: `HV_PGO=gen` to build an instrumented APK, play a fight, merge the profile
    with `llvm-profdata merge -o pgo/fight.profdata hackversus.profraw`, then build with `HV_PGO=use:<path>`.
-4. **Windows:** with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (ucrt, x86_64) in `toolchain/`, run
+4. **Windows:** with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (ucrt, x86_64) in the toolchains folder, run
    `tools/build_win_deps.sh` once, then `tools/build_win.sh` → `out-win/hackversus.exe`.
 
 Test helpers in `tools/`: `goto_title.sh`, `goto_fight.sh`, `measure_fight.sh` (phone over adb, the device is

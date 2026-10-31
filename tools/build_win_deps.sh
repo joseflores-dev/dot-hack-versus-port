@@ -5,7 +5,7 @@ set -e
 unset MSYS_NO_PATHCONV
 cd "$(dirname "$0")/.."
 P=$PWD
-TC=$P/toolchain
+TC=${HV_TOOLCHAINS:-/c/git-personal/toolchains}   # compartida entre proyectos
 MG=$(cd $TC/llvm-mingw-* && pwd)
 export PATH="$MG/bin:$PATH"
 CM=$TC/cmake-4.4.5-windows-x86_64/bin/cmake

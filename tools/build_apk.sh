@@ -6,7 +6,9 @@ set -e
 unset MSYS_NO_PATHCONV
 cd "$(dirname "$0")/.."
 P=$PWD; W=$(pwd -W)
-TC=$P/toolchain
+# Toolchains y sysroot de Android compartidos entre proyectos (C:\git-personal\toolchains).
+TC=${HV_TOOLCHAINS:-/c/git-personal/toolchains}
+SR=${HV_SYSROOT_ANDROID:-$TC/sysroot-android}; SRW=$(cd "$SR" && pwd -W)
 NDK=$TC/android-ndk-r30
 BT=$TC/build-tools-35.0.1
 AJ=$TC/android-35/android.jar
@@ -36,9 +38,9 @@ if true; then
     $CM -S hackversus -B $BD -G Ninja -DCMAKE_MAKE_PROGRAM=$TC/ninja.exe \
         -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a \
         -DANDROID_PLATFORM=android-31 -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_PREFIX_PATH=$P/sysroot -DCMAKE_FIND_ROOT_PATH=$P/sysroot -DPS3RECOMP_RSX_VULKAN=ON \
+        -DCMAKE_PREFIX_PATH=$SR -DCMAKE_FIND_ROOT_PATH=$SR -DPS3RECOMP_RSX_VULKAN=ON \
         -DPS3RECOMP_DIR=$P/ps3recomp-0.18.0 -DRECOMP_DIR=$P/recomp -DPython3_EXECUTABLE=$P/.venv/Scripts/python.exe \
-        "-DPORT_SPU_INPUTS=$IN" -Dglslang_DIR=$W/sysroot/lib/cmake/glslang -DPS3RECOMP_SPU_MERGE_CHUNKS=ON -DHV_APK=ON \
+        "-DPORT_SPU_INPUTS=$IN" -Dglslang_DIR=$SRW/lib/cmake/glslang -DPS3RECOMP_SPU_MERGE_CHUNKS=ON -DHV_APK=ON \
         "-DCMAKE_C_FLAGS=$PGOF" "-DCMAKE_CXX_FLAGS=$PGOF" "-DCMAKE_SHARED_LINKER_FLAGS=$PGOF" > $BD-configure.log
 fi
 # Fase 19: el contexto SPU tampoco vive en el LS ni en memoria del juego -> __restrict (el lifter no lo emite).
@@ -46,7 +48,7 @@ sed -i 's/(spu_context\* ctx)/(spu_context* __restrict ctx)/g' $BD/generated_spu
 $CM --build $BD > $BD/build.log 2>&1 || { grep -E "error" $BD/build.log | head -20; exit 1; }
 mkdir -p "$B/lib/arm64-v8a"
 $NDK/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-strip -o "$B/lib/arm64-v8a/libmain.so" $BD/libmain.so
-cp sysroot/lib/libSDL2.so "$B/lib/arm64-v8a/"
+cp $SR/lib/libSDL2.so "$B/lib/arm64-v8a/"
 
 # 2. Java -> dex
 BCP="$(cygpath -w "$AJ");$(cygpath -w "$BT/core-lambda-stubs.jar")"   # a ;-list is not path-converted

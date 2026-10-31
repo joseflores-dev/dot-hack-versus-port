@@ -145,6 +145,20 @@ struct WeaponIcons { int carrier; uint8_t sig[64]; int rel; char name[48];
 enum { MAX_CARRIERS = 4 };
 WeaponIcons s_icons[MAX_CARRIERS];
 int s_nicons;
+/* "chrname <code> <colour index> <original>|<new>": while that colour of a "subst" line is on, the character's name
+ * in the title's text (every copy of <original> followed by its zero) reads <new> */
+struct NameSwap { char code[16]; unsigned val; char orig[48], repl[48]; int n; uint32_t at[16]; int cap[16]; int on; };
+enum { MAX_NAMES = 16 };
+NameSwap s_names[MAX_NAMES];
+int s_nnames;
+/* "chrpic <code> <colour index> <offset> <64 bytes hex> <file>": while that colour of a "subst" line is on, a picture
+ * the title already has in memory (the character's name in the character menu, name_csel_*: csel_txt.xfbin is loaded
+ * before any colour is chosen, so serving another file is too late) is overwritten with <file> (its pixel data as the
+ * texture keeps it, DXT blocks); found by the 64 bytes at <offset> from its start, put back when the colour turns off */
+struct PicSwap { char code[16]; unsigned val; int rel; uint8_t sig[64]; uint8_t* pic; size_t len; uint8_t* orig;
+                 int n; uint32_t at[4]; int on; };
+PicSwap s_pics[MAX_NAMES];
+int s_npics;
 int s_nswaps = -1;
 int s_chrlog = -1;
 
@@ -284,7 +298,11 @@ uint8_t* build_from_patch(const ChrSwap& w, const uint8_t* entry)
         const uint8_t* tb = pt + 40;
         const uint8_t* q = tb + 16 * (size_t)nch;
         if (q + 12 > pt + pn) { why = "truncated"; break; }
+        /* no chunks: an entry stored plain (data/ui/name/*.xfbin): the operations run on the entry itself and the
+         * result is served as it is */
+        if (nch == 0 && (slen != elen || dlen != elen)) { why = "a plain entry's patch must keep its size"; break; }
         src = (uint8_t*)std::malloc(slen); dst = (uint8_t*)std::malloc(dlen);
+        if (nch == 0) std::memcpy(src, entry, elen);
         size_t at = 0;
         for (uint32_t i = 0; i < nch && !why; i++) {
             const uint32_t o = le32(tb + 16 * i), fs = le32(tb + 16 * i + 4), es = le32(tb + 16 * i + 8);
@@ -307,6 +325,7 @@ uint8_t* build_from_patch(const ChrSwap& w, const uint8_t* entry)
         }
         if (why) break;
         if (t != dlen || crc32_of(dst, dlen) != dcrc) { why = "the result does not check out"; break; }
+        if (nch == 0) { out = dst; dst = nullptr; break; }
         /* pack: the original header and chunk table, then each chunk compressed (plain if that does not shrink it),
          * aligned, in ID order; the sizes in the table follow */
         out = (uint8_t*)std::calloc(elen, 1);
@@ -318,7 +337,12 @@ uint8_t* build_from_patch(const ChrSwap& w, const uint8_t* entry)
             if (pos >= elen) { why = "does not fit"; break; }
             size_t c = crilayla_pack(dst + d0, (long)es, out + pos, elen - pos);
             if (!c) { if (pos + es > elen) { why = "does not fit"; break; } std::memcpy(out + pos, dst + d0, es); c = es; }
-            be_put(out + field, c, 4);
+            /* the FileSize field: u32, or u16 (bit 31 set by make_patch.py) for the small chunks of DataL -- writing
+             * 4 bytes there zeroed the size and hit the next column, and the title hung loading the model */
+            if (field & 0x80000000u) {
+                if (c > 0xFFFF) { why = "does not fit"; break; }
+                be_put(out + (field & 0x7FFFFFFFu), c, 2);
+            } else be_put(out + field, c, 4);
             pos += c; data += c; d0 += es;
         }
         if (why) break;
@@ -430,6 +454,30 @@ void load_mods()
          * reads of the entry's bytes in the CPK [offset, offset+length) are served from <file> instead (same size
          * and format as the entry: make_chunked.py) -- CriFs and the index are not touched. */
         char sp[400];
+        if (s_nnames < MAX_NAMES) {
+            NameSwap& ns = s_names[s_nnames];
+            ns = {};
+            if (std::sscanf(line, "chrname %15s %u %47[^|]|%47[^\r\n]", ns.code, &ns.val, ns.orig, ns.repl) == 4) { s_nnames++; continue; }
+        }
+        {
+            PicSwap ps = {};
+            char pf[400];
+            if (std::sscanf(line, "chrpic %15s %u %u %159s %399[^\r\n]", ps.code, &ps.val, &rel, sig, pf) == 5) {
+                char full[1000];
+                if (pf[0] == '/' || pf[0] == 92 || (pf[0] && pf[1] == ':')) std::snprintf(full, sizeof full, "%s", pf);
+                else std::snprintf(full, sizeof full, "%s%s", dir, pf);
+                ps.pic = read_file(full, &ps.len);
+                if (std::strlen(sig) == 128 && ps.pic && ps.len >= 64 && s_npics < MAX_NAMES) {
+                    for (int i = 0; i < 64; i++) { unsigned v; std::sscanf(sig + 2 * i, "%2x", &v); ps.sig[i] = (uint8_t)v; }
+                    ps.rel = (int)rel;
+                    s_pics[s_npics++] = ps;
+                } else {
+                    std::fprintf(stderr, "[mods] chrpic: cannot use %s\n", full);
+                    std::free(ps.pic);
+                }
+                continue;
+            }
+        }
         if (std::sscanf(line, "subst %15s %u %d %llx %lld %399[^\r\n]", w.code, &w.val, &w.slot, &w.subst_at, &w.subst_len, sp) == 6) {
             char full[1000];   /* relative to the mods file */
             if (sp[0] == '/' || sp[0] == 92 || (sp[0] && sp[1] == ':')) std::snprintf(full, sizeof full, "%s", sp);
@@ -690,6 +738,81 @@ static int guest_find(const uint8_t* pat, size_t len, uint32_t* out, int cap)
 
 /* The character menu's colour selector (func_002865F0 draws "%02d/%02d" from the setting object's +0x1C current
  * index and +0x20 highest index). HV_CHRLOG=1 logs the object whenever it changes. */
+/* the "chrname" lines of a subst colour turned on or off: the name's copies are found when it turns on (the text
+ * may have been reloaded since) and put back when it turns off */
+static void names_apply(const char* code, unsigned val, int on)
+{
+    for (int i = 0; i < s_nnames; i++) {
+        NameSwap& ns = s_names[i];
+        if (ns.val != val || std::strcmp(ns.code, code) != 0 || ns.on == on) continue;
+        const size_t L = std::strlen(ns.orig), R = std::strlen(ns.repl);
+        if (on) {
+            uint8_t pat[64];
+            std::memcpy(pat, ns.orig, L); pat[L] = 0;
+            uint32_t m[16];
+            const int k = guest_find(pat, L + 1, m, 16);
+            ns.n = 0;
+            for (int j = 0; j < k; j++) {
+                if (m[j] && vm_base[m[j] - 1] >= 0x20 && vm_base[m[j] - 1] < 0x7F) continue;   /* the end of a longer text */
+                int z = 0;
+                while (z < 32 && vm_base[m[j] + L + z] == 0) z++;
+                ns.at[ns.n] = m[j]; ns.cap[ns.n++] = (int)L + z - 1;
+            }
+            for (int j = 0; j < ns.n; j++) {
+                const size_t c = R < (size_t)ns.cap[j] ? R : (size_t)ns.cap[j];
+                std::memset(vm_base + ns.at[j], 0, (size_t)ns.cap[j] + 1);
+                std::memcpy(vm_base + ns.at[j], ns.repl, c);
+            }
+        } else {
+            for (int j = 0; j < ns.n; j++) {
+                const size_t c = R < (size_t)ns.cap[j] ? R : (size_t)ns.cap[j];
+                if (std::strncmp((const char*)vm_base + ns.at[j], ns.repl, c) != 0) continue;   /* reloaded meanwhile */
+                std::memset(vm_base + ns.at[j], 0, (size_t)ns.cap[j] + 1);
+                std::memcpy(vm_base + ns.at[j], ns.orig, L);
+            }
+        }
+        ns.on = on;
+        std::fprintf(stderr, "[mods] %s colour %u: name %s -> %s (%d copies)\n", code, val + 1,
+                     on ? ns.orig : ns.repl, on ? ns.repl : ns.orig, ns.n);
+    }
+}
+
+/* the "chrpic" lines of a subst colour turned on or off: the picture is found when it turns on (it may have been
+ * reloaded since), its original kept, and put back when it turns off unless the title reloaded it meanwhile */
+static void pics_apply(const char* code, unsigned val, int on)
+{
+    for (int i = 0; i < s_npics; i++) {
+        PicSwap& ps = s_pics[i];
+        if (ps.val != val || std::strcmp(ps.code, code) != 0 || ps.on == on) continue;
+        if (on) {
+            /* another colour's picture of the same character still on (the cursor moved from it to this one before
+             * that colour's line turned off): put the original back first, or the signature is not there */
+            for (int o = 0; o < s_npics; o++)
+                if (o != i && s_pics[o].on && std::strcmp(s_pics[o].code, code) == 0) pics_apply(code, s_pics[o].val, 0);
+            uint32_t m[4];
+            const int k = guest_find(ps.sig, 64, m, 4);
+            ps.n = 0;
+            for (int j = 0; j < k; j++) if (m[j] >= (uint32_t)ps.rel) ps.at[ps.n++] = m[j] - (uint32_t)ps.rel;
+            if (ps.n) {
+                if (!ps.orig) ps.orig = (uint8_t*)std::malloc(ps.len);
+                std::memcpy(ps.orig, vm_base + ps.at[0], ps.len);
+            }
+            for (int j = 0; j < ps.n; j++) {
+                std::memcpy(vm_base + ps.at[j], ps.pic, ps.len);
+                rsx_draw_engine_touch_ea(ps.at[j], (uint32_t)ps.len);
+            }
+        } else {
+            for (int j = 0; j < ps.n; j++) {
+                if (std::memcmp(vm_base + ps.at[j], ps.pic, ps.len) != 0) continue;   /* reloaded meanwhile */
+                std::memcpy(vm_base + ps.at[j], ps.orig, ps.len);
+                rsx_draw_engine_touch_ea(ps.at[j], (uint32_t)ps.len);
+            }
+        }
+        ps.on = on;
+        std::fprintf(stderr, "[mods] %s colour %u: picture %s (%d copies)\n", code, val + 1, on ? "swapped" : "restored", ps.n);
+    }
+}
+
 extern "C" void hv_color_hook(uint32_t setting, uint32_t widget)
 {
     load_mods();
@@ -719,6 +842,7 @@ extern "C" void hv_color_hook(uint32_t setting, uint32_t widget)
                           replace_rows(mod ? w.orig_abs : w.repl_abs, mod ? w.repl_abs : w.orig_abs);
             w.on = mod;
             std::fprintf(stderr, "[mods] %s: %s (colour %u in the selector, %d copies of the index row)\n", w.code, mod ? "mod" : "original", w.val + 1, n);
+            if (w.colour == 2) { names_apply(w.code, w.val, mod); pics_apply(w.code, w.val, mod); }
         }
     }
     static uint8_t last[0x40];

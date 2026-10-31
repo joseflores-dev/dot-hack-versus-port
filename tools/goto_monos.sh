@@ -5,7 +5,7 @@
 export MSYS_NO_PATHCONV=1
 S=${HV_ADB_SERIAL:-$(adb devices | awk 'NR>1 && $2=="device"{print $1; exit}')}
 OUT="$1"; shift
-TMP="$(dirname "$0")/../build-apk/goto_tmp.png"
+mkdir -p "$(dirname "$0")/../frames"; TMP="$(dirname "$0")/../frames/goto_tmp.png"
 ENV=""; for kv in "$@"; do ENV="$ENV$kv\n"; done
 adb -s $S shell "printf '$ENV' > /sdcard/PS3/hv_env.txt; am force-stop com.hackversus.port; am start -n com.hackversus.port/.HackVersusActivity" >/dev/null
 sleep 12

@@ -51,8 +51,10 @@ row vectors, degrees, rotation order Z·Y·X, in cm; vertices are s16 · scale/2
 
 To turn such a model into a Versus colour, it goes onto the Versus fighter's skeleton bone by bone (both games use
 the same 3ds Max Biped names), keeping G.U.'s proportions and its own weights; triangles are faced by the CCS's
-stored normals and made double-sided (G.U. draws both sides, Versus culls the back). The released Haseo 3rd Form
-mod was made that way.
+stored normals. G.U. draws both sides of its meshes and Versus culls the back: the released Haseo 3rd Form mod
+copies every triangle to the other side; the Black Rose colours instead set their materials' cull mode to 0 (the
+NUD material field at +0x12, as Versus's own hair uses), which keeps half the vertices to skin. `gu/` also reads
+the newer CCS files of .hack//G.U. Last Recode (version 0x131: 32-bit UVs, 12-byte bone influences, DXT1 textures).
 
 
 ## Extra weapons (PC Costume Settings)
@@ -74,6 +76,21 @@ nothing changes. Several carriers can be used at once, one per weapon type (twin
 belongs to the carrier of the `weapon` lines after it. Released mods: 16 twin blades from .hack//G.U. Vol. 3 on
 Empty Skies (Haseo, Kite, Sora and Sakuya get the same list) and 16 broadswords on King's Tail (`weapon_27`,
 `data/weapon/wls00.xfbin`) for Black Rose.
+
+## Name of a new colour (v0.4.5)
+
+The fighter's name is a picture, in two files. On the health bar and the VS screen it is
+`data/ui/name/name_<code>.xfbin` (256x48 DXT3: the 1P name on top, left-aligned, the 2P name below, right-aligned),
+read when the fight loads: a normal `subst` line serves it for that colour. That entry is stored uncompressed, and
+`make_patch.py` makes such patches too (they need v0.4.5). In the character menu it is `name_csel_<code>` inside
+`data/ui/csel/csel_txt.xfbin`, already in memory before any colour is chosen, so it is overwritten there instead:
+```
+subst 1blr01 2 4 B3AB800 14260 mods/blackrose/blr_1mat01.name.hvpatch
+chrpic 1blr01 2 <offset> <64 bytes hex> mods/blackrose/blr_1mat01.name_csel
+```
+`chrpic` finds the picture by those 64 bytes at `<offset>` from its start and writes the file (its pixel data as DXT
+blocks: 512x48 DXT5) while that colour is on; the original comes back when it turns off. The released Black Rose
+names were made with letters cut from the other fighters' names.
 
 ## Español
 
@@ -112,8 +129,10 @@ vector fila, grados, orden Z·Y·X, en cm; vértices = s16 · escala/256 / 16 en
 
 Para hacerlo un color de Versus, el modelo se pasa al esqueleto del luchador hueso por hueso (los dos juegos usan los
 mismos nombres del Biped de 3ds Max), conservando las proporciones y los pesos de G.U.; los triángulos se orientan
-con las normales guardadas en el CCS y van con sus dos caras (G.U. dibuja ambas, Versus descarta la de atrás). Así
-se hizo el mod publicado de Haseo 3ª forma.
+con las normales guardadas en el CCS. G.U. dibuja las dos caras de sus mallas y Versus descarta la de atrás: el mod
+publicado de Haseo 3ª forma copia cada triángulo al otro lado; los colores de Black Rose en cambio ponen el modo de
+descarte de sus materiales en 0 (el campo del material NUD en +0x12, como el pelo del propio Versus), con la mitad
+de vértices que animar.
 
 ### Armas extra (PC Costume Settings)
 
@@ -128,3 +147,15 @@ pistolas 19-25, espadas 26-32, guantes 33-39): el selector de cada luchador toma
 `weaponicons` vale para el soporte de las líneas `weapon` que la siguen. Mods publicados: 16 dagas de .hack//G.U.
 Vol. 3 sobre Empty Skies (la misma lista para Haseo, Kite, Sora y Sakuya) y 16 espadas gigantes sobre King's Tail
 (`weapon_27`, `data/weapon/wls00.xfbin`) para Black Rose.
+
+### Nombre de un color nuevo (v0.4.5)
+
+El nombre del luchador es una imagen, en dos archivos. En la barra de vida y la pantalla VS es
+`data/ui/name/name_<código>.xfbin` (256x48 DXT3: arriba el nombre de 1P alineado a la izquierda, abajo el de 2P a la
+derecha), que se lee al cargar la pelea: una línea `subst` normal lo sirve para ese color. Esa entrada va sin
+comprimir y `make_patch.py` también hace esos parches (requieren v0.4.5). En el menú de personajes es
+`name_csel_<código>` dentro de `data/ui/csel/csel_txt.xfbin`, que ya está en memoria antes de elegir el color, así que
+se reescribe ahí: `chrpic 1blr01 2 <offset> <64 bytes hex> mods/blackrose/blr_1mat01.name_csel`. El port ubica la
+imagen por esos 64 bytes a `<offset>` de su inicio y escribe el archivo (sus píxeles en bloques DXT: 512x48 DXT5)
+mientras ese color está activo; al salir vuelve la original. Los nombres publicados para Black Rose se armaron con
+letras recortadas de los nombres de los otros luchadores.

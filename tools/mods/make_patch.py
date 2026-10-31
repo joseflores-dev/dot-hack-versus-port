@@ -12,8 +12,10 @@ uso: python tools/mods/make_patch.py <DATA.CPK> <ruta en el CPK> <archivo editad
 Formato (little-endian):
   "HVPATCH1", u32 largo de la entrada, u32 crc32 de la entrada original, u32 tamaño descomprimido original,
   u32 tamaño descomprimido nuevo, u32 crc32 del descomprimido nuevo, u32 ContentOffset, u32 Align, u32 trozos
-  por trozo (en orden de ID): u32 offset en la entrada, u32 FileSize, u32 ExtractSize, u32 posición del campo FileSize
+  por trozo (en orden de ID): u32 offset en la entrada, u32 FileSize, u32 ExtractSize, u32 posición del campo FileSize (con el bit 0x80000000 si es de 16 bits: los trozos chicos de DataL;
+  el port lo entiende desde v0.4.5)
   u32 posición de ContentSize (u64 BE) o 0xFFFFFFFF, u32 posición de EnabledDataSize (u64 BE) o 0xFFFFFFFF
+  (0 trozos = entrada sin comprimir: las operaciones van sobre la entrada misma y el resultado se sirve tal cual)
   u32 operaciones; cada una: u8 tipo (0 copiar del original, 1 insertar, 2 ceros), u32 offset en el original
   (0 si no copia), u32 largo; luego los bytes insertados, seguidos."""
 import os
@@ -27,9 +29,14 @@ from cpk import chunked_layout, read_entry, unpack_entry  # noqa: E402
 
 cpk_path, name, newf, outp = sys.argv[1:5]
 off, orig, _ = read_entry(cpk_path, name)
-assert orig[:4] == b'CPK ', 'por ahora solo entradas "CPK interno" (como los modelos data/chr/*chrpsn.xfbin)'
-h, table = chunked_layout(orig)
-src = unpack_entry(orig)
+if orig[:4] == b'CPK ':
+    h, table = chunked_layout(orig)
+    src = unpack_entry(orig)
+else:
+    # entrada guardada tal cual (sin comprimir, p. ej. data/ui/name/*.xfbin): 0 trozos; el port aplica las operaciones
+    # sobre la entrada misma y sirve el resultado sin empaquetar (desde v0.4.5)
+    assert orig[:8] != b'CRILAYLA', 'entrada comprimida sin CPK interno: no soportada'
+    h, table, src = {'ContentOffset': (0,), 'Align': (1,)}, [], orig
 dst = open(newf, 'rb').read()
 assert len(dst) == len(src), 'el archivo editado mide %d bytes; tiene que medir %d, como el original' % (len(dst), len(src))
 
@@ -102,7 +109,9 @@ for kind, a, ln in ops:
 out += ins
 open(outp, 'wb').write(out)
 print('%s: %d bytes (%d operaciones, %d bytes nuevos de %d)' % (outp, len(out), len(ops), len(ins), len(dst)))
-code = os.path.basename(name).split('chrpsn')[0]
+code = os.path.basename(name).split('chrpsn')[0].split('.')[0]
+code = code[5:] if code.startswith('name_') else code   # data/ui/name/name_blr01.xfbin -> blr01 (subst lleva 1blr01)
+code = code if code[:1].isdigit() else '1' + code
 if len(sys.argv) > 6:
     print('hv_mods.txt:\nsubst %s %s %s %X %d mods/%s' % (code, sys.argv[6], sys.argv[5], off, len(orig), os.path.basename(outp)))
 else:

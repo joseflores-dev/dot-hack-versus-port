@@ -150,14 +150,15 @@ ya no existen).
 
 ## Compilar desde el código
 
-Todo vive en la carpeta del proyecto; no se instala nada en el sistema.
+No se instala nada en el sistema. Las herramientas viven en una carpeta compartida con otros ports, por defecto
+`C:\git-personal\toolchains` (se cambia con `HV_TOOLCHAINS`, y el sysroot de Android con `HV_SYSROOT_ANDROID`).
 
 <details>
 <summary>Pasos</summary>
 
-1. **Herramientas** (no incluidas): Android NDK r30, CMake ≥ 3.28, Ninja, JDK 17, build-tools 35.0.1 y el
-   `android.jar` de la API 35, Python 3.10 con `pip install -r ps3recomp-0.18.0/requirements.txt`, y SDL2 + glslang
-   para `arm64-v8a` en `sysroot/`.
+1. **Herramientas** (no incluidas), en la carpeta de herramientas: Android NDK r30, CMake ≥ 3.28, Ninja, JDK 17,
+   build-tools 35.0.1, el `android.jar` de la API 35 y SDL2 + glslang para `arm64-v8a` en `sysroot-android/`. En el
+   proyecto: Python 3.10 en `.venv/` con `pip install -r ps3recomp-0.18.0/requirements.txt`.
 2. **Traducir el juego** una vez (`game/EBOOT.ELF` es el ejecutable descifrado, por ejemplo volcado por un emulador):
    ```
    P=.venv/Scripts/python; R=ps3recomp-0.18.0/tools
@@ -173,7 +174,7 @@ Todo vive en la carpeta del proyecto; no se instala nada en el sistema.
    Los releases usan una compilación guiada por perfil: `HV_PGO=gen` para un APK instrumentado, jugar una pelea,
    unir el perfil con `llvm-profdata merge -o pgo/fight.profdata hackversus.profraw` y compilar con
    `HV_PGO=use:<ruta>`.
-4. **Windows:** con [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (ucrt, x86_64) en `toolchain/`, ejecuta una
+4. **Windows:** con [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (ucrt, x86_64) en la carpeta de herramientas, ejecuta una
    vez `tools/build_win_deps.sh` y luego `tools/build_win.sh` → `out-win/hackversus.exe`.
 
 Ayudas para probar en `tools/`: `goto_title.sh`, `goto_fight.sh`, `measure_fight.sh` (teléfono por adb, el

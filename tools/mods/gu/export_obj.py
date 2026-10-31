@@ -42,8 +42,37 @@ def wm(i):
 for i in range(len(k['nodes'])): wm(i)
 
 # Texturas: índice de 8 bits con paleta (en PS2 la paleta de 256 va intercalada en bloques de 8: CSM1).
+def dxt1(data, w, h):
+    """DXT1 (BC1) -> RGBA: bloques de 4x4, dos colores 565 y 2 bits por píxel."""
+    out = np.zeros((h, w, 4), np.uint8)
+    blocks = np.frombuffer(data[: w * h // 2], np.uint8).reshape(h // 4, w // 4, 8)
+    c0 = blocks[..., 0].astype(np.uint32) | (blocks[..., 1].astype(np.uint32) << 8)
+    c1 = blocks[..., 2].astype(np.uint32) | (blocks[..., 3].astype(np.uint32) << 8)
+    def rgb(c):
+        return np.stack([(c >> 11) * 255 // 31, ((c >> 5) & 63) * 255 // 63, (c & 31) * 255 // 31], -1).astype(np.int32)
+    a, b = rgb(c0), rgb(c1)
+    four = (c0 > c1)[..., None]
+    pal = np.stack([a, b, np.where(four, (2 * a + b) // 3, (a + b) // 2), np.where(four, (a + 2 * b) // 3, 0)], 2)
+    alpha = np.stack([np.full(c0.shape, 255), np.full(c0.shape, 255), np.full(c0.shape, 255),
+                      np.where(c0 > c1, 255, 0)], 2)
+    bits = blocks[..., 4:8].astype(np.uint32)
+    idx = bits[..., 0] | (bits[..., 1] << 8) | (bits[..., 2] << 16) | (bits[..., 3] << 24)
+    for y in range(4):
+        for x in range(4):
+            k = ((idx >> (2 * (4 * y + x))) & 3).astype(np.intp)
+            col = np.take_along_axis(pal, k[..., None, None].repeat(3, -1), 2)[..., 0, :]
+            al = np.take_along_axis(alpha, k[..., None], 2)[..., 0]
+            out[y::4, x::4, :3] = col
+            out[y::4, x::4, 3] = al
+    return out
+
+
 texfile = {}
 for sid, t in c.textures.items():
+    if t.get('dxt'):   # Last Recode: DXT1, guardada de cabeza
+        im = Image.fromarray(dxt1(t['dxt'], t['w'], t['h'])).transpose(Image.FLIP_TOP_BOTTOM)
+        name = c.objnames[sid] + '.png'; im.save(os.path.join(out, name)); texfile[sid] = name
+        continue
     pal = c.cluts.get(t['clut'])
     if pal is None: continue
     if SWZ and len(pal) == 256:

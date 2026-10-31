@@ -7,7 +7,7 @@ export MSYS_NO_PATHCONV=1
 S=${HV_ADB_SERIAL:-$(adb devices | awk 'NR>1 && $2=="device"{print $1; exit}')}
 OUT="$1"; shift
 D="$(dirname "$0")"
-TMP="$D/../build-apk/goto_tmp.png"
+mkdir -p "$D/../frames"; TMP="$D/../frames/goto_tmp.png"
 # Datos de la app en modo ISO (antes /sdcard/PS3).
 A=/sdcard/Android/data/com.hackversus.port/files/PS3
 # Sin partida guardada, el salto automático (✕ cada 1,5 s) atraviesa la intro hasta los monos. CON partida el juego

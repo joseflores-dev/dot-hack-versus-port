@@ -131,7 +131,8 @@ def crilayla(src):
 
 def chunked_layout(entry):
     """De una entrada "CPK interno": (cabecera, trozos en orden de ID como (offset, FileSize, ExtractSize,
-    posición del campo FileSize)), con la cabecera como dict de utf_cols."""
+    posición del campo FileSize, con el bit 0x80000000 si el campo es de 16 bits)), con la cabecera como dict de
+    utf_cols."""
     assert entry[:4] == b'CPK ', 'la entrada no es un CPK interno'
     _, hrows = utf_cols(entry[0x10:], 0x10)
     h = hrows[0]
@@ -154,7 +155,11 @@ def chunked_layout(entry):
     pos, table = content, []
     for r in chunks:   # seguidos desde ContentOffset, alineados, en orden de ID
         pos += (-pos) % align
-        table.append((pos, r['FileSize'][0], r['ExtractSize'][0], r['FileSize'][1]))
+        # posición del campo FileSize; con el bit alto si es de 16 bits (los trozos chicos de DataL)
+        fpos = r['FileSize'][1]
+        if fpos is not None and r['FileSize'][2] == '>H':
+            fpos |= 0x80000000
+        table.append((pos, r['FileSize'][0], r['ExtractSize'][0], fpos))
         pos += r['FileSize'][0]
     return h, table
 
