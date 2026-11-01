@@ -32,3 +32,6 @@ NOTAS-DESARROLLO.md
 *.log
 __pycache__/
 ps3recomp-0.18.0/.github/
+
+# capturas del juego para tools/nav_fight.py (locales: imágenes del juego, no van al repo)
+tools/nav_ref/

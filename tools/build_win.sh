@@ -9,7 +9,7 @@ TC=${HV_TOOLCHAINS:-/c/git-personal/toolchains}   # compartida entre proyectos
 MG=$(cd $TC/llvm-mingw-* && pwd)
 export PATH="$MG/bin:$PATH"
 CM=$TC/cmake-4.4.5-windows-x86_64/bin/cmake
-B=build-win
+B=${HV_BUILD_DIR:-build-win}; OUTW=${HV_OUT_DIR:-out-win}   # HV_WIN_FLAGS: flags extra (p. ej. -g)
 
 IN="$W/game/EBOOT.ELF"; for e in spu_jobs/*.elf; do IN="$IN;$W/$e"; done
 # Ganchos del port en el código generado (mods de personajes): recomp/ está fuera del repo.
@@ -20,11 +20,11 @@ $CM -S hackversus -B $B -G Ninja -DCMAKE_MAKE_PROGRAM=$TC/ninja.exe -DCMAKE_BUIL
     -DCMAKE_PREFIX_PATH=$W/sysroot-win -DPS3RECOMP_RSX_VULKAN=ON -DPS3RECOMP_VULKAN_INCLUDE_DIR=$W/sysroot-win/vkinclude \
     -DPS3RECOMP_DIR=$W/ps3recomp-0.18.0 -DRECOMP_DIR=$W/recomp -DPython3_EXECUTABLE=$W/.venv/Scripts/python.exe \
     "-DPORT_SPU_INPUTS=$IN" -Dglslang_DIR=$W/sysroot-win/lib/cmake/glslang -DSDL2_DIR=$W/sysroot-win/lib/cmake/SDL2 \
-    -DPS3RECOMP_SPU_MERGE_CHUNKS=ON > $B-configure.log
+    -DPS3RECOMP_SPU_MERGE_CHUNKS=ON "-DCMAKE_C_FLAGS=${HV_WIN_FLAGS:-}" "-DCMAKE_CXX_FLAGS=${HV_WIN_FLAGS:-}" > $B-configure.log
 # Fase 19: el contexto SPU no vive en memoria del juego -> __restrict (el lifter no lo emite).
 sed -i 's/(spu_context\* ctx)/(spu_context* __restrict ctx)/g' $B/generated_spu/*/spu_recomp.c $B/generated_spu/*/spu_recomp.h 2>/dev/null || true
 $CM --build $B -- -k 0 > $B/build.log 2>&1 || { grep -E "error" $B/build.log | head -40; exit 1; }
-mkdir -p out-win
-cp $B/MyGameRecomp.exe out-win/hackversus.exe
-cp sysroot-win/bin/SDL2.dll out-win/
-ls -l out-win
+mkdir -p $OUTW
+cp $B/MyGameRecomp.exe $OUTW/hackversus.exe
+cp sysroot-win/bin/SDL2.dll $OUTW/
+ls -l $OUTW/hackversus.exe

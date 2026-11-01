@@ -121,6 +121,13 @@ void spu_lockline_unlock(void) { if (pthread_mutex_unlock(&g_lockline)) abort();
 #define SPU_COH_BITMAP_SZ   (SPU_COH_LINES / 8)                 /* 4 MiB */
 
 static unsigned char s_coh_bitmap[SPU_COH_BITMAP_SZ];
+/* HV: the inline PPU store check (ppu_recomp.h, ppu_mm) takes the bitmap once, at ppu_mm_publish: the
+ * array is static, so the pointer never changes; publishing it early only means a store tests a zero bit. */
+const unsigned char* spu_coh_bitmap_publish(void)
+{
+    if (!g_spu_coh_bits) g_spu_coh_bits = s_coh_bitmap;
+    return s_coh_bitmap;
+}
 
 /* g_spu_coh_bits (spu_coh_bitmap.h) stays NULL until the first GETLLAR
  * anywhere. That keeps the PPU fast path off the bitmap entirely for a title

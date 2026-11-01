@@ -124,6 +124,7 @@ typedef struct {
     u64 snap_serial;       /* depth_serial the copy was taken at            */
     int cleared;
     int had_write;
+    int guest_cleared;   /* HV: the guest's own full depth clear since the target was made or last drawn */
     int snapshot_valid;
     u64 depth_serial;      /* g.write_serial of the last depth write or clear */
     int guest_dirty;       /* written since guest memory last got a copy     */
@@ -1019,6 +1020,7 @@ static u32 eng_zdepth_get(u32 location, u32 offset, u32 rt_w, u32 rt_h)
     z->snapshot = 0;
     z->cleared = 0;
     z->had_write = 0;
+    z->guest_cleared = 0;
     z->snapshot_valid = 0;
     z->depth_serial = 0;
     z->guest_dirty = 0;
@@ -1037,7 +1039,12 @@ static u32 eng_zdepth_get(u32 location, u32 offset, u32 rt_w, u32 rt_h)
 static u32 eng_zdepth_snapshot(u32 slot, u32 tex_w, u32 tex_h)
 {
     eng_zdepth* z = &g.zdepths[slot];
-    if (!z->handle || !z->had_write) return 0;
+    /* HV: or a full depth clear by the guest itself: the host image then holds exactly the clear value, which is
+     * what the guest-memory copy would hold too. A shadow map cleared and sampled with nothing drawn into it took
+     * the guest-memory path every time in a .hack//Versus fight: a GPU wait, a 1024x2048 readback, a conversion
+     * and a fresh texture decode, the spikes of the S22's RSX thread. The bind-time clear (sink_end) is not the
+     * guest's and does not count. */
+    if (!z->handle || !(z->had_write || z->guest_cleared)) return 0;
     /* The texture covers the top-left tex_w x tex_h of the zeta. The host
      * depth target is at least canvas-sized (eng_zdepth_get), so a 128x160
      * shadow map lives in the corner of a 1280x720 image; resolving all of it
@@ -2884,12 +2891,13 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
             if (conv) { textures[u] = conv; continue; }
             /* HV_ZLOG=1: why the fast paths were refused, once a second. */
             { static int on = -1; static time_t last;
+              static int first = 0;   /* HV: the first 8 always (a fight hits this path once a minute or so) */
               if (on < 0) on = getenv("HV_ZLOG") != NULL;
-              if (on && time(NULL) != last) { last = time(NULL);
+              if ((on && time(NULL) != last) || first < 8) { last = time(NULL); first++;
                   const eng_zdepth* z = &g.zdepths[zsrc];
-                  fprintf(stderr, "[zlog] fmt 0x%02X %ux%u bound=%d handle=%u had_write=%d serial=%llu snap=%u "
+                  fprintf(stderr, "[zlog] fmt 0x%02X %ux%u bound=%d handle=%u had_write=%d gclr=%d serial=%llu snap=%u "
                           "snap_valid=%d be_snapshot=%d\n", t.format, t.width, t.height, current_zslot == (u32)zsrc,
-                          z->handle, z->had_write, (unsigned long long)z->depth_serial, z->snapshot, z->snapshot_valid,
+                          z->handle, z->had_write, z->guest_cleared, (unsigned long long)z->depth_serial, z->snapshot, z->snapshot_valid,
                           g.be->depth_snapshot != NULL); } }
             /* The slow path: a full GPU->guest depth copy. Name the format that lands here, once each. */
             { static u32 seen[16]; static int n_seen;
@@ -3739,7 +3747,7 @@ static void sink_clear(void* user, const rsx_dispatch* r, u32 mask)
             /* A clear invalidates the older published depth image; the next
              * texture consumer resolves the newly written pass exactly once.
              * Past a partial clear the rest still holds what was drawn. */
-            if (!partial) g.zdepths[zslot].had_write = 0;
+            if (!partial) { g.zdepths[zslot].had_write = 0; g.zdepths[zslot].guest_cleared = 1; }
             g.zdepths[zslot].snapshot_valid = 0;
             eng_zdepth_wrote(zslot, &sf);
         }

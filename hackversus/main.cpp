@@ -43,6 +43,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string>
+#include <thread>   /* vblank_clock */
+#include <chrono>
 #ifdef HV_APK
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_main.h>   /* on Android this renames main() to the extern "C" SDL_main SDLActivity calls */
@@ -124,6 +126,7 @@ int      cellGcm_take_flip_pending(void);
 void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
 unsigned cellGcm_flip_request_count(void);
 void     cellGcm_fifo_kick_wait(unsigned ms); /* sleep up to ms, waking at once on a FIFO kick */
+void     cellGcm_fifo_kick(void);
 }
 
 /* ---------------------------------------------------------------------------
@@ -244,6 +247,43 @@ static void hv_pin_big(const char* who)
 static void hv_pin_big(const char* who) { (void)who; }
 #endif
 
+/* HV: the vblank beat on its own thread (HV_VBLANK_THREAD=0: the old beat inside frame_clock).
+ * frame_clock ticked between FIFO drains, so a 20-30 ms drain held the beat back and the while loop below
+ * then fired the missed ticks back to back: the game's VSync thread woke 0.1 ms apart, the frame after a long
+ * one started at once (43 ms, then 24 ms) and flips were never paced. The period was also 16 ms (62.5 Hz).
+ * Here: an absolute 59.94 Hz clock, missed beats are skipped rather than burst (the hardware never bursts),
+ * and each beat kicks the walker so a completed flip is presented at once. */
+static int s_vblank_thread = 1;
+static void vblank_clock()
+{
+    using clk = std::chrono::steady_clock;
+    const auto period = std::chrono::nanoseconds(16683333);
+    auto next = clk::now() + period;
+    for (;;) {
+#ifdef _WIN32
+        std::this_thread::sleep_until(next - std::chrono::microseconds(1500));   /* timeBeginPeriod(1): ~1 ms */
+        while (clk::now() < next) std::this_thread::yield();
+#else
+        std::this_thread::sleep_until(next);
+#endif
+        cellGcmTickVBlank();
+        cellGcmTickFlip();
+        cellGcm_fifo_kick();
+        /* every 300 beats: the real beat rate and the guest's flips per second (a title paced to every second
+         * vblank flips at half the beat) */
+        { static unsigned n; static unsigned f0; static auto t0 = clk::now();
+          if (++n == 300) {
+              const double s = std::chrono::duration<double>(clk::now() - t0).count();
+              const unsigned f = cellGcm_flip_request_count();
+              fprintf(stderr, "[hv] vblank %.2f Hz, guest flips %.2f/s\n", n / s, (f - f0) / s);
+              n = 0; f0 = f; t0 = clk::now();
+          } }
+        next += period;
+        const auto now = clk::now();
+        while (next <= now) next += period;
+    }
+}
+
 static DWORD WINAPI frame_clock(LPVOID)
 {
     hv_pin_big("fifo walker");
@@ -256,6 +296,9 @@ static DWORD WINAPI frame_clock(LPVOID)
 
     unsigned  last_flip = 0;
     ULONGLONG next_tick = GetTickCount64();
+    { const char* e = getenv("HV_VBLANK_THREAD"); if (e) s_vblank_thread = atoi(e); }
+    if (s_vblank_thread) std::thread(vblank_clock).detach();
+    fprintf(stderr, "[hv] vblank beat: %s\n", s_vblank_thread ? "own thread, 59.94 Hz" : "frame_clock, 16 ms");
 
     for (;;) {
         /* Not a flat Sleep(4): a guest thread that polls an RSX label kicks the FIFO (sys_timer_usleep does), and
@@ -264,7 +307,7 @@ static DWORD WINAPI frame_clock(LPVOID)
         ULONGLONG now = GetTickCount64();
 
         int fired = 0;
-        while ((long long)(now - next_tick) >= 0 && fired < 240) {
+        while (!s_vblank_thread && (long long)(now - next_tick) >= 0 && fired < 240) {
             cellGcmTickVBlank();
             cellGcmTickFlip();
             /* Present a pending flip BEFORE draining any further. The flip

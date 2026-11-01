@@ -495,6 +495,7 @@ static int  vk_present_lazy(void);     /* the present waits a frame late (see vk
  * results flushes them first, so everything else keeps the invariant that
  * all earlier work has completed. */
 static u32 s_eb_pending;
+static unsigned long long s_eb_batch_no = 1;   /* bumped whenever the open batch is submitted (s_eb_pending = 0) */
 /* Batches submitted at a present without waiting (vk_eng_flush_async): the
  * GPU draws frame N while the walker records N+1. Two command buffers and
  * fences take turns; s_eb_inflight counts the submitted, unwaited ones. */
@@ -918,7 +919,7 @@ static void vk_cmd_after_everything(VkCommandBuffer cb)
 
 /* The command buffer / fence pairs that take turns (vk_eng_flush_async).
  * Slot 0 is s_vk.cmd / s_vk.fence as created; the others are made on first
- * use. HV_SLOTS=<n> (default 4, 2..8): with two, the present's submission
+ * use. HV_SLOTS=<n> (default 8, 2..8): with two, the present's submission
  * switched to the slot of the batch submitted a few ms before it and waited
  * for the GPU to finish that batch -- 10 ms of every .hack//Versus fight
  * frame; with four the walker waits only when the GPU is three batches
@@ -933,7 +934,9 @@ static u32             s_slot_n;          /* 0 until the slots exist */
 static u32 vk_slots_wanted(void)
 {
     static int n = -1;
-    if (n < 0) { const char* e = getenv("HV_SLOTS"); n = e ? atoi(e) : 4; if (n < 2) n = 2; if (n > VK_SLOTS_MAX) n = VK_SLOTS_MAX; }
+    /* HV: 8 by default (was 4). ~8 flushes a frame each waited for the batch 4 flushes back: 7-9 % of the S22 RSX
+     * thread waiting on the GPU; with 8, 2 % and more frames on the 33 ms beat (A/B, fase 35). */
+    if (n < 0) { const char* e = getenv("HV_SLOTS"); n = e ? atoi(e) : 8; if (n < 2) n = 2; if (n > VK_SLOTS_MAX) n = VK_SLOTS_MAX; }
     return (u32)n;
 }
 
@@ -1087,6 +1090,7 @@ static int vk_submit_and_wait(void)
     struct timespec t0, t1; timespec_get(&t0, TIME_UTC);
     VK_CHECK(vk_queue_submit(&si, s_vk.fence), "vkQueueSubmit");
     s_eb_pending = 0;                    /* everything recorded went with it */
+    s_eb_batch_no++;
     VK_CHECK(vk_fence_wait(s_vk.fence), "vkWaitForFences");
     timespec_get(&t1, TIME_UTC);
     vk_ts_read(vk_ts_slot());
@@ -4782,6 +4786,7 @@ __attribute__((noinline)) static void vk_eng_flush(void)
         return;
     }
     s_eb_pending = 0;               /* first: the submit below must not re-enter */
+    s_eb_batch_no++;
     s_vk_site_caller = (uintptr_t)__builtin_return_address(0);
     vk_submit_and_wait();
     vk_eb_idle_reset();
@@ -4824,6 +4829,7 @@ static void vk_eng_flush_async(void)
         VK_LOG("asynchronous present flush: on, %u command buffers\n", s_slot_n);
     }
     s_eb_pending = 0;
+    s_eb_batch_no++;
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                         .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
     vk_pass_close_on(s_vk.cmd);
@@ -4902,6 +4908,34 @@ static VkDescriptorSet vk_eng_write_descriptors_to(const vk_eng_pipe* P, VkDescr
 typedef struct { VkImageView v[RSX_MAX_TEXTURES]; VkSampler s[RSX_MAX_TEXTURES]; u32 split, vsb, psb; } vk_desc_key;
 static struct { vk_desc_key key; VkDescriptorSet set; VkDescriptorPool pool; unsigned long long gen; int valid; } s_dc;
 static unsigned long long s_dc_hits, s_dc_miss;
+/* HV: the constant slices of the last batched draw (vk_ubc). ~480 draws a fight frame each copied ~8 KB of vertex
+ * constants into the write-combined uniform ring; a draw whose constants equal the previous one's, in the same
+ * open batch (its slices are not released before the batch is submitted), binds that slice again.
+ * HV_UBC=0 copies every draw's constants as before. */
+static struct { int on; unsigned long long batch; u32 bytes[2]; VkDeviceSize off[2]; u8 data[2][16384]; } s_ubc = { -1 };
+static unsigned long long s_ubc_hit[2], s_ubc_n;
+static int vk_ubc_same(int k, const u8* src, u32 bytes)
+{
+    if (s_ubc.on < 0) s_ubc.on = !(getenv("HV_UBC") && getenv("HV_UBC")[0] == '0');
+    return s_ubc.on && src && s_eb_pending && s_ubc.batch == s_eb_batch_no && s_ubc.bytes[k] == bytes &&
+           bytes <= sizeof s_ubc.data[k] && !memcmp(s_ubc.data[k], src, bytes);
+}
+static void vk_ubc_commit(VkDeviceSize uvs, VkDeviceSize ups, u32 vsb, u32 psb, int rv, int rp)
+{
+    const u8* src[2] = { vk_eng_ucpu(), vk_eng_ucpu() + s_g.ps_off };
+    const VkDeviceSize off[2] = { uvs, ups };
+    const u32 bytes[2] = { vsb, psb };
+    const int reused[2] = { rv, rp };
+    s_ubc_n++;
+    if (s_ubc.batch != s_eb_batch_no) { s_ubc.bytes[0] = s_ubc.bytes[1] = 0; s_ubc.batch = s_eb_batch_no; }
+    for (int k = 0; k < 2; k++) {
+        if (reused[k]) { s_ubc_hit[k]++; continue; }
+        memcpy((u8*)s_eb.ub.ptr + off[k], src[k], bytes[k]);
+        s_ubc.off[k] = off[k];
+        if (bytes[k] <= sizeof s_ubc.data[k]) { memcpy(s_ubc.data[k], src[k], bytes[k]); s_ubc.bytes[k] = bytes[k]; }
+        else s_ubc.bytes[k] = 0;
+    }
+}
 
 /* What vk_eng_write_descriptors_to would write for P. 0: it would fail. */
 static int vk_eng_desc_key(const vk_eng_pipe* P, u32 vsb, u32 psb, vk_desc_key* k)
@@ -5032,8 +5066,11 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
             VkDeviceSize vh = s_eb.vb_head, ih = s_eb.ib_head, uh = s_eb.ub_head;
             voff = vk_eb_take(&vh, s_eb.vb_tail, VK_EB_VB_BYTES, vbytes, stride ? stride : 16u);
             ioff = ibytes ? vk_eb_take(&ih, s_eb.ib_tail, VK_EB_IB_BYTES, ibytes, 16u) : 0;
-            const VkDeviceSize uvs = vk_eb_take(&uh, s_eb.ub_tail, VK_EB_UB_BYTES, vsb, s_eb.ub_align);
-            const VkDeviceSize ups = uvs == (VkDeviceSize)-1 ? uvs : vk_eb_take(&uh, s_eb.ub_tail, VK_EB_UB_BYTES, psb, s_eb.ub_align);
+            /* HV: constants equal to the previous draw's, in the same open batch, reuse its slice (vk_ubc). */
+            const int rv = vk_ubc_same(0, vk_eng_ucpu(), vsb), rp = vk_ubc_same(1, vk_eng_ucpu() + s_g.ps_off, psb);
+            const VkDeviceSize uvs = rv ? s_ubc.off[0] : vk_eb_take(&uh, s_eb.ub_tail, VK_EB_UB_BYTES, vsb, s_eb.ub_align);
+            const VkDeviceSize ups = uvs == (VkDeviceSize)-1 ? uvs :
+                                     rp ? s_ubc.off[1] : vk_eb_take(&uh, s_eb.ub_tail, VK_EB_UB_BYTES, psb, s_eb.ub_align);
             if (voff != (VkDeviceSize)-1 && ioff != (VkDeviceSize)-1 && ups != (VkDeviceSize)-1 &&
                 s_eb.sets < VK_EB_MAX_SETS) {
                 VkDescriptorSetLayout lay = P->cube_mask ? s_e2.split_layout : s_g.set_layout;
@@ -5048,8 +5085,7 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
                     set = s_dc.set;
                     s_dc_hits++;
                     s_eb.vb_head = vh; s_eb.ib_head = ih; s_eb.ub_head = uh;
-                    memcpy((u8*)s_eb.ub.ptr + uvs, vk_eng_ucpu(), vsb);
-                    memcpy((u8*)s_eb.ub.ptr + ups, vk_eng_ucpu() + s_g.ps_off, psb);
+                    vk_ubc_commit(uvs, ups, vsb, psb, rv, rp);
                     dyn_off[0] = (u32)uvs; dyn_off[1] = (u32)ups;
                     vkt_add(1, td);
                     break;
@@ -5057,8 +5093,7 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
                 if (pvkAllocateDescriptorSets(s_vk.device, &dai, &set) == VK_SUCCESS) {
                     s_eb.sets++;
                     s_eb.vb_head = vh; s_eb.ib_head = ih; s_eb.ub_head = uh;
-                    memcpy((u8*)s_eb.ub.ptr + uvs, vk_eng_ucpu(), vsb);
-                    memcpy((u8*)s_eb.ub.ptr + ups, vk_eng_ucpu() + s_g.ps_off, psb);
+                    vk_ubc_commit(uvs, ups, vsb, psb, rv, rp);
                     if (s_dyn_ubo > 0) {
                         /* The slices go in as dynamic offsets: the set itself starts at 0. */
                         if (!vk_eng_write_descriptors_to(P, set, s_eb.ub.buf, 0, 0)) return;
@@ -5551,6 +5586,8 @@ void rsx_vulkan_backend_present(void)
     if (dt >= 5.0) {
         VK_LOG("%.1f fps, %llu sync submits/s, %.0f%% of the time waiting on them\n", n / dt,
                (unsigned long long)(s_vk_sync_n / dt), s_vk_sync_ns / (dt * 1e7));
+        if (s_ubc_n) { VK_LOG("  constant slices reused: VS %.0f%%, PS %.0f%% of %llu draws\n", 100.0 * s_ubc_hit[0] / s_ubc_n,
+                              100.0 * s_ubc_hit[1] / s_ubc_n, s_ubc_n); s_ubc_hit[0] = s_ubc_hit[1] = s_ubc_n = 0; }
         if (s_vkt_on > 0) {
             static const char* const nm[4] = { "submit", "descriptors", "end", "begin" };
             VK_LOG("  render passes %.1f per frame (%.2f Mpx each), clears %.1f per frame\n",

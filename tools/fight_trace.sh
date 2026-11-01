@@ -1,14 +1,14 @@
 #!/bin/bash
 # Línea de tiempo PS3_FTRACE de una pelea CPU vs CPU en el teléfono y su informe por cuadro.
 # uso: tools/fight_trace.sh <etiqueta> [VAR=valor ...]   -> frames/ft_<etiqueta>.txt y frames/ft_<etiqueta>_report.txt
-# La traza empieza a los 150 s del arranque de la app (la pelea llega a ~125 s) y dura 5 s.
+# La traza empieza a los 75 s del arranque de la app (la pelea llega a ~50 s) y dura 5 s; HV_FT=<inicio>:<seg> la cambia.
 export MSYS_NO_PATHCONV=1
 S=${HV_ADB_SERIAL:-$(adb devices | awk 'NR>1 && $2=="device"{print $1; exit}')}
 TAG="$1"; shift
 D="$(dirname "$0")/.."; W=$(cd "$D" && pwd -W)
 F=/sdcard/Android/data/com.hackversus.port/files/ft.txt
 adb -s $S shell "rm -f $F"
-bash "$D/tools/goto_fight.sh" "$D/frames/ft_$TAG.png" "PS3_FTRACE=150:5:$F" "$@" >/dev/null || { echo "$TAG: no llegó"; exit 1; }
+bash "$D/tools/goto_fight.sh" "$D/frames/ft_$TAG.png" "PS3_FTRACE=${HV_FT:-75:5}:$F" "$@" >/dev/null || { echo "$TAG: no llegó"; exit 1; }
 # El archivo se escribe al terminar la ventana; esperar a que exista y deje de crecer.
 prev=-1
 for i in $(seq 1 30); do

@@ -706,7 +706,7 @@ static int spu_mfc_atomic(spu_context* ctx, uint32_t cmd)
       if (s_ae < 0) { const char* e = getenv("SPU_ATOM_EA");
         s_aea = e ? (uint32_t)strtoul(e, 0, 16) & ~127u : 0; s_ae = s_aea ? 1 : 0;
         if (s_ae == 1) { extern uint32_t g_barrier_sync_watch;
-            g_barrier_sync_watch = s_aea; } /* arm PUTLLC OK/FAIL verdict log */ }
+            g_barrier_sync_watch = s_aea; { extern uint32_t g_ppu_store_watch; g_ppu_store_watch = 1; } } /* arm PUTLLC OK/FAIL verdict log */ }
       if (s_ae == 1 && ((uint32_t)ea & ~127u) == s_aea) {
           static int _n = 0, s_cap = -1;
           /* SPU_ATOM_EA_MAX=<n>: lines to print (default 48, 0 = unlimited). */

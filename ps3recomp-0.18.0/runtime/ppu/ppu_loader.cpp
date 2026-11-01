@@ -1422,6 +1422,8 @@ static inline int vm_oob(uint32_t a, uint32_t n)
 extern "C" PPU_THREAD_LOCAL ppu_context* g_active_ctx;
 extern "C" void ppu_dump_guest_stack(ppu_context*, const char*);
 extern "C" uint32_t g_null_sweep_hi = 0;   /* 0 = not sweeping */
+extern "C" uint32_t g_barrier_sync_watch;
+extern "C" uint32_t g_ppu_store_watch = 0;   /* HV: g_barrier_sync_watch | g_null_sweep_hi (inline store check) */
 static uint32_t g_null_sweep_last = 0;
 static unsigned g_null_sweep_tid = 0;
 static int vm_null_store_report(uint32_t a, uint32_t v, int width, void* ra)
@@ -1432,7 +1434,7 @@ static int vm_null_store_report(uint32_t a, uint32_t v, int width, void* ra)
     if (!en) return 0;                                    /* let it land */
     { static int sweep = -1;
       if (sweep < 0) { const char* e = getenv("PS3_NULL_SWEEP"); sweep = e ? 1 : 0; }
-      if (sweep) { g_null_sweep_hi = 1; g_null_sweep_last = a;
+      if (sweep) { g_null_sweep_hi = 1; g_ppu_store_watch = 1; g_null_sweep_last = a;
                    g_null_sweep_tid = g_active_ctx
                                     ? (unsigned)g_active_ctx->thread_id : 0u; } }
     { static long n = 0;
@@ -1494,6 +1496,7 @@ static int vm_null_sweep(uint32_t a)
         return 1;                       /* still the same sweep: drop */
     }
     g_null_sweep_hi = 0;                /* pattern broken: it is over */
+    g_ppu_store_watch = g_barrier_sync_watch;
     { static int said = 0;
       if (!said) { said = 1;
           fprintf(stderr, "[null-write] sweep contained, ended at 0x%08X\n",
@@ -1569,8 +1572,22 @@ static void pt_restore(uint32_t addr) { for (int i=0;i<g_pt_n;i++) if (g_pt_addr
 #endif
 /* Stack of currently-executing indirect-call (vtable) targets on this thread, so a
  * write hook can name the virtual method that is running when it writes a value. */
-static PPU_THREAD_LOCAL uint32_t g_vcall_stk[128];
-static PPU_THREAD_LOCAL int      g_vcall_sp = 0;
+/* HV: the indirect-call path's thread-locals in ONE block. In libmain.so (dlopen'ed on Android) every
+ * thread-local is a TLSDESC call of its own, and ps3_indirect_call touched six of them per call (the cache,
+ * the depth, the vcall stack and pointer, the target override): one block is one resolution. */
+struct ppu_icache_ent { uint32_t addr; void (*fn)(ppu_context*); };
+static PPU_THREAD_LOCAL struct {
+    int vcall_sp, dispatch_depth, icall_target_set;
+    uint32_t icall_target;
+    uint32_t vcall_stk[128];
+    ppu_icache_ent icache[1024];
+} g_ptls;
+#define g_vcall_stk        (g_ptls.vcall_stk)
+#define g_vcall_sp         (g_ptls.vcall_sp)
+#define g_dispatch_depth   (g_ptls.dispatch_depth)
+#define g_icall_target     (g_ptls.icall_target)
+#define g_icall_target_set (g_ptls.icall_target_set)
+#define g_icache           (g_ptls.icache)
 /* Nesting depth of ps3_indirect_call on this host thread (the recursion guard
  * in ps3_indirect_call_impl). A host coroutine that runs guest code and ends by
  * switching away from inside an indirect call never unwinds its frames, so one
@@ -1580,7 +1597,6 @@ static PPU_THREAD_LOCAL int      g_vcall_sp = 0;
  * switches away and restoring it when it switches back; threads that never
  * switch keep using their thread-local count. The vcall stack pointer leaks
  * the same way. */
-static PPU_THREAD_LOCAL int      g_dispatch_depth = 0;
 extern "C" int* ps3_ppu_dispatch_depth_slot(void) { return &g_dispatch_depth; }
 extern "C" int* ps3_ppu_vcall_sp_slot(void) { return &g_vcall_sp; }
 
@@ -2579,8 +2595,6 @@ static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
 
 /* ps3_indirect_call_to: dispatch to an explicit guest target with CTR left as
  * the guest had it (b<cond>lrl branches through LR; CTR must not change). */
-static PPU_THREAD_LOCAL uint32_t g_icall_target;
-static PPU_THREAD_LOCAL int      g_icall_target_set;
 extern "C" void ps3_indirect_call(ppu_context* ctx);
 extern "C" void ps3_indirect_call_to(ppu_context* ctx, uint32_t target)
 {
@@ -2611,11 +2625,28 @@ static int ps3_icall_lean(void)
     return lean;
 }
 
+/* Per-thread cache in front of the 4 MB registry (HV_ICALL_CACHE=0 turns it
+ * off): a fight's virtual calls go to a few hundred targets, and each lookup in
+ * the big table was a cache miss (the probe loop was ~5 % of the S22's main
+ * thread). 1024 direct-mapped entries, 16 KB. Functions are registered once at
+ * load and never removed, so an entry cannot go stale. */
+static inline ppu_fn ppu_lookup_cached(uint32_t a)
+{
+    static int on = -1;
+    if (on < 0) on = !(getenv("HV_ICALL_CACHE") && getenv("HV_ICALL_CACHE")[0] == '0');
+    if (!on) return ppu_lookup(a);
+    ppu_icache_ent& e = g_icache[(a >> 2) & 1023];
+    if (e.addr == a && e.fn) return e.fn;
+    ppu_fn fn = ppu_lookup(a);
+    if (fn) { e.addr = a; e.fn = fn; }
+    return fn;
+}
+
 extern "C" void ps3_indirect_call(ppu_context* ctx)
 {
     if (ps3_icall_lean() && !g_icall_target_set) {
         const uint32_t addr = (uint32_t)ctx->ctr;
-        ppu_fn fn = addr ? ppu_lookup(addr) : nullptr;
+        ppu_fn fn = addr ? ppu_lookup_cached(addr) : nullptr;
         if (fn) {
             if (g_dispatch_depth > 4000) { ps3_indirect_call_impl(ctx); return; }   /* the guard, with its log */
             g_active_ctx = ctx;

@@ -1229,10 +1229,13 @@ extern "C" JNIEXPORT void JNICALL Java_com_hackversus_port_PadView_nativePad(JNI
 #include <unistd.h>
 #include <algorithm>
 #include <vector>
+#include <tuple>
 
 static const int kProfMax = 1 << 20;
 static uintptr_t* s_prof_pc;
+static uint16_t*  s_prof_fr;   /* HV: the guest flip count at each sample (heavy-frame report) */
 static std::atomic<int> s_prof_n{0};
+extern "C" unsigned cellGcm_flip_request_count(void);
 
 /* libc's text range: a sample inside it is charged to the first caller outside, found through the frame-pointer
  * chain (x29) -- "something is in futex/nanosleep" says nothing, who called it does. */
@@ -1262,7 +1265,10 @@ static void on_sigprof(int, siginfo_t*, void* uc)
     }
     const int i = s_prof_n.fetch_add(1, std::memory_order_relaxed);
     /* The thread in the top bits (a PC without its PAC signature fits in 39): the report is per thread. */
-    if (i < kProfMax) s_prof_pc[i] = (pc & 0x7FFFFFFFFFull) | ((uintptr_t)syscall(SYS_gettid) << 40);
+    if (i < kProfMax) {
+        s_prof_pc[i] = (pc & 0x7FFFFFFFFFull) | ((uintptr_t)syscall(SYS_gettid) << 40);
+        if (s_prof_fr) s_prof_fr[i] = (uint16_t)cellGcm_flip_request_count();
+    }
 }
 
 static void* prof_thread(void* arg)
@@ -1318,6 +1324,46 @@ static void* prof_thread(void* arg)
                              (unsigned long)(pc - (uintptr_t)di.dli_fbase), hot[k].first);
             else
                 std::fprintf(stderr, "[prof] ? 0x%lx %d\n", (unsigned long)pc, hot[k].first);
+        }
+    }
+    /* HV: heavy frames. Per busy thread: samples per guest frame (flip to flip); the frames with at least 1.4x
+     * the median are "heavy", and their hottest addresses are listed beside each address's count over all
+     * frames -- what a slow frame does that a normal one does not. */
+    if (s_prof_fr) {
+        for (size_t t = 0; t < tids.size() && t < 3; t++) {
+            const long tid = tids[t].second;
+            std::vector<int> per(65536, 0);
+            for (int k = 0; k < n; k++)
+                if ((long)(s_prof_pc[k] >> 40) == tid) per[s_prof_fr[k]]++;
+            std::vector<int> counts;
+            for (int c : per) if (c) counts.push_back(c);
+            if (counts.size() < 10) continue;
+            std::vector<int> sorted = counts; std::sort(sorted.begin(), sorted.end());
+            const int med = sorted[sorted.size() / 2];
+            const int lim = med + (med * 2 + 4) / 5;   /* 1.4x */
+            long hs = 0; int hf = 0;
+            for (int c : counts) if (c >= lim) { hs += c; hf++; }
+            std::fprintf(stderr, "[prof-heavy] thread %ld: %zu frames, median %d samples, %d heavy (>= %d, avg %ld)\n",
+                         tid, counts.size(), med, hf, lim, hf ? hs / hf : 0L);
+            std::vector<std::pair<uintptr_t, int>> hv;   /* pc, 1 = heavy frame */
+            for (int k = 0; k < n; k++)
+                if ((long)(s_prof_pc[k] >> 40) == tid)
+                    hv.push_back({s_prof_pc[k] & 0xFFFFFFFFFFull, per[s_prof_fr[k]] >= lim});
+            std::sort(hv.begin(), hv.end());
+            std::vector<std::tuple<int, int, uintptr_t>> agg;   /* heavy count, all count, pc */
+            for (size_t i = 0; i < hv.size();) {
+                size_t j = i; int h = 0;
+                while (j < hv.size() && hv[j].first == hv[i].first) { h += hv[j].second; j++; }
+                agg.push_back({h, (int)(j - i), hv[i].first}); i = j;
+            }
+            std::sort(agg.rbegin(), agg.rend());
+            for (size_t k = 0; k < agg.size() && k < 300; k++) {
+                const uintptr_t pc = std::get<2>(agg[k]);
+                Dl_info di;
+                if (dladdr((void*)pc, &di) && di.dli_fname)
+                    std::fprintf(stderr, "[prof-heavy] %ld %s +0x%lx %d %d\n", tid, di.dli_fname,
+                                 (unsigned long)(pc - (uintptr_t)di.dli_fbase), std::get<0>(agg[k]), std::get<1>(agg[k]));
+            }
         }
     }
     std::fflush(stderr);
@@ -1469,6 +1515,7 @@ extern "C" void hv_prof_start(void)
     const char* e = getenv("HV_PROF");
     if (!e || atoi(e) <= 0) return;
     s_prof_pc = (uintptr_t*)calloc(kProfMax, sizeof(uintptr_t));
+    s_prof_fr = (uint16_t*)calloc(kProfMax, sizeof(uint16_t));
     {   /* libc's mapped range, from its own symbols' module base and /proc/self/maps */
         Dl_info di;
         if (dladdr((void*)&nanosleep, &di) && di.dli_fbase) {
@@ -1510,6 +1557,7 @@ extern "C" void hv_prof_start(void)
 #include <map>
 #include <string>
 #include <vector>
+#include <tuple>
 #include <algorithm>
 static DWORD WINAPI hv_prof_thread_win(LPVOID arg)
 {
@@ -1575,7 +1623,8 @@ static DWORD WINAPI hv_prof_thread_win(LPVOID arg)
         std::sort(v.rbegin(), v.rend());
         std::fprintf(stderr, "[prof] thread %lu %s: %u samples, %u%% running in the exe\n", (unsigned long)t.first,
                      name.c_str(), total[t.first], 100u * in_exe / total[t.first]);
-        for (size_t i = 0; i < v.size() && i < 25; i++) {
+        static const size_t top = getenv("HV_PROF_TOP") ? (size_t)atol(getenv("HV_PROF_TOP")) : 25;   /* direcciones por hilo */
+        for (size_t i = 0; i < v.size() && i < top; i++) {
             const uintptr_t pc = v[i].second;
             if (pc >= base && pc < base + 0x10000000) std::fprintf(stderr, "[prof] %lu %s exe+0x%llx %u\n", (unsigned long)t.first, name.c_str(), (unsigned long long)(pc - base), v[i].first);
             else std::fprintf(stderr, "[prof] %lu %s abs 0x%llx %u\n", (unsigned long)t.first, name.c_str(), (unsigned long long)pc, v[i].first);

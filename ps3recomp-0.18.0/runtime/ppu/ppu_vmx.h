@@ -28,14 +28,13 @@ extern "C" {
 #define VMX_INL static inline
 
 /* ---- element access (big-endian) ---- */
-VMX_INL uint16_t vmx_h(const uint8_t* v, int i) { return (uint16_t)(v[2 * i] << 8 | v[2 * i + 1]); }
-VMX_INL uint32_t vmx_w(const uint8_t* v, int i) {
-    return (uint32_t)v[4 * i] << 24 | (uint32_t)v[4 * i + 1] << 16 | (uint32_t)v[4 * i + 2] << 8 | v[4 * i + 3];
-}
-VMX_INL void vmx_sh(uint8_t* v, int i, uint16_t x) { v[2 * i] = (uint8_t)(x >> 8); v[2 * i + 1] = (uint8_t)x; }
-VMX_INL void vmx_sw(uint8_t* v, int i, uint32_t x) {
-    v[4 * i] = (uint8_t)(x >> 24); v[4 * i + 1] = (uint8_t)(x >> 16); v[4 * i + 2] = (uint8_t)(x >> 8); v[4 * i + 3] = (uint8_t)x;
-}
+/* HV: one load/store and a byte swap per element. The byte-at-a-time forms were not merged by the compiler:
+ * every word an integer VMX op wrote cost four strb plus shifts (871 arm64 instructions for a 60-op HUD
+ * function, most of them single bytes). Same bytes either way. */
+VMX_INL uint16_t vmx_h(const uint8_t* v, int i) { uint16_t x; memcpy(&x, v + 2 * i, 2); return __builtin_bswap16(x); }
+VMX_INL uint32_t vmx_w(const uint8_t* v, int i) { uint32_t x; memcpy(&x, v + 4 * i, 4); return __builtin_bswap32(x); }
+VMX_INL void vmx_sh(uint8_t* v, int i, uint16_t x) { x = __builtin_bswap16(x); memcpy(v + 2 * i, &x, 2); }
+VMX_INL void vmx_sw(uint8_t* v, int i, uint32_t x) { x = __builtin_bswap32(x); memcpy(v + 4 * i, &x, 4); }
 VMX_INL float    vmx_f(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
 VMX_INL uint32_t vmx_u(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
 
@@ -317,6 +316,52 @@ VMX_INL void vmx_vsubfp(VMX_D, VMX_A, VMX_B, uint32_t vscr) {
     const uint32x4_t z = vreinterpretq_u32_f32(vsubq_f32(vreinterpretq_f32_u32(x), vreinterpretq_f32_u32(y)));
     vmx_nst(d_, vmx_nflush(vmx_nnan2(z, x, y), vscr));
 }
+#elif defined(__x86_64__) && defined(__FMA__) && defined(__SSE4_1__) && !defined(VMX_SCALAR)
+/* HV: the same four ops for x86-64 (the PC build is -march=x86-64-v3): the scalar loops compiled to ~100
+ * byte loads and inserts per call, and the game thread spends most of its PC time here. Same lane rules as
+ * the NEON forms above: pshufb for the big-endian lanes, a real fused vfmadd, the same flush / NaN choices
+ * (under VMX_FAST as there). */
+#include <immintrin.h>
+VMX_INL __m128i vmx_xbs(void) { return _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12); }
+VMX_INL __m128i vmx_xld(const void* p) { return _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)p), vmx_xbs()); }
+VMX_INL void vmx_xst(void* p, __m128i v) { _mm_storeu_si128((__m128i*)p, _mm_shuffle_epi8(v, vmx_xbs())); }
+VMX_INL __m128i vmx_xflush(__m128i v, uint32_t vscr) {
+#ifdef VMX_FAST
+    (void)vscr; return v;
+#endif
+    if (!(vscr & VMX_NJ)) return v;
+    const __m128i den = _mm_cmpeq_epi32(_mm_and_si128(v, _mm_set1_epi32(0x7F800000)), _mm_setzero_si128());
+    return _mm_blendv_epi8(v, _mm_and_si128(v, _mm_set1_epi32((int)0x80000000u)), den);
+}
+VMX_INL __m128i vmx_xisnan(__m128i v) {
+    return _mm_cmpgt_epi32(_mm_and_si128(v, _mm_set1_epi32(0x7FFFFFFF)), _mm_set1_epi32(0x7F800000));
+}
+VMX_INL __m128i vmx_xfix(__m128i r) {
+#ifdef VMX_FAST
+    return r;
+#else
+    return _mm_blendv_epi8(r, _mm_set1_epi32(0x7FC00000), vmx_xisnan(r));
+#endif
+}
+VMX_INL __m128i vmx_xnan2(__m128i r, __m128i a, __m128i b) {
+#ifdef VMX_FAST
+    (void)a; (void)b; return r;
+#endif
+    const __m128i q = _mm_set1_epi32(0x7FC00000);
+    __m128i out = vmx_xfix(r);
+    out = _mm_blendv_epi8(out, _mm_or_si128(b, q), vmx_xisnan(b));
+    return _mm_blendv_epi8(out, _mm_or_si128(a, q), vmx_xisnan(a));
+}
+#define VMX_XF(v) _mm_castsi128_ps(v)
+#define VMX_XI(v) _mm_castps_si128(v)
+VMX_INL void vmx_vaddfp(VMX_D, VMX_A, VMX_B, uint32_t vscr) {
+    const __m128i x = vmx_xflush(vmx_xld(a_), vscr), y = vmx_xflush(vmx_xld(b_), vscr);
+    vmx_xst(d_, vmx_xflush(vmx_xnan2(VMX_XI(_mm_add_ps(VMX_XF(x), VMX_XF(y))), x, y), vscr));
+}
+VMX_INL void vmx_vsubfp(VMX_D, VMX_A, VMX_B, uint32_t vscr) {
+    const __m128i x = vmx_xflush(vmx_xld(a_), vscr), y = vmx_xflush(vmx_xld(b_), vscr);
+    vmx_xst(d_, vmx_xflush(vmx_xnan2(VMX_XI(_mm_sub_ps(VMX_XF(x), VMX_XF(y))), x, y), vscr));
+}
 #else
 VMX_FBIN(vmx_vaddfp, vmx_f(x) + vmx_f(y), 1)
 VMX_FBIN(vmx_vsubfp, vmx_f(x) - vmx_f(y), 1)
@@ -339,6 +384,19 @@ VMX_INL void vmx_vnmsubfp(VMX_D, VMX_A, VMX_B, VMX_C, uint32_t vscr) {
     const float32x4_t z = vreinterpretq_f32_u32(vmx_nflush(vmx_nld(c_), vscr));
     const float32x4_t r = vnegq_f32(vfmaq_f32(vnegq_f32(y), x, z));
     vmx_nst(d_, vmx_nflush(vmx_nfix(vreinterpretq_u32_f32(r)), vscr));
+}
+#elif defined(__x86_64__) && defined(__FMA__) && defined(__SSE4_1__) && !defined(VMX_SCALAR)
+VMX_INL void vmx_vmaddfp(VMX_D, VMX_A, VMX_B, VMX_C, uint32_t vscr) {
+    const __m128 x = VMX_XF(vmx_xflush(vmx_xld(a_), vscr)), y = VMX_XF(vmx_xflush(vmx_xld(b_), vscr)),
+                 z = VMX_XF(vmx_xflush(vmx_xld(c_), vscr));
+    vmx_xst(d_, vmx_xflush(vmx_xfix(VMX_XI(_mm_fmadd_ps(x, z, y))), vscr));
+}
+/* -(a*c - b) fused, negated last (not fnmadd, whose exact-zero result is +0 where this one is -0) */
+VMX_INL void vmx_vnmsubfp(VMX_D, VMX_A, VMX_B, VMX_C, uint32_t vscr) {
+    const __m128 x = VMX_XF(vmx_xflush(vmx_xld(a_), vscr)), y = VMX_XF(vmx_xflush(vmx_xld(b_), vscr)),
+                 z = VMX_XF(vmx_xflush(vmx_xld(c_), vscr));
+    const __m128 r = _mm_xor_ps(_mm_fmsub_ps(x, z, y), _mm_castsi128_ps(_mm_set1_epi32((int)0x80000000u)));
+    vmx_xst(d_, vmx_xflush(vmx_xfix(VMX_XI(r)), vscr));
 }
 #else
 VMX_INL void vmx_vmaddfp(VMX_D, VMX_A, VMX_B, VMX_C, uint32_t vscr) { VMX_ARGS_PREP; const uint8_t* c = (const uint8_t*)c_;
@@ -445,6 +503,39 @@ VMX_INL uint32_t vmx_vcmpbfp(VMX_D, VMX_A, VMX_B) { VMX_ARGS_PREP; int inb = 1;
     for (int i = 0; i < 4; i++) { float x = vmx_f(vmx_w(a, i)), y = vmx_f(vmx_w(b, i));
         uint32_t v = (!(x <= y) ? 0x80000000u : 0) | (!(x >= -y) ? 0x40000000u : 0);
         inb &= v == 0; vmx_sw(r, i, v); } VMX_OUT; return (uint32_t)(inb << 1); }
+
+/* HV: vperm. The lifter emitted a 16-step byte loop per vperm (~1000 of them in .hack//Versus, the HUD's
+ * matrix helpers among the hottest functions of the game thread). Registers hold their bytes in guest
+ * order, so vperm is a plain 32-byte table lookup with index c & 0x1F. */
+#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(VMX_SCALAR)
+VMX_INL void vmx_vperm(VMX_D, VMX_A, VMX_B, VMX_C) {
+    const uint8x16x2_t t = { { vld1q_u8((const uint8_t*)a_), vld1q_u8((const uint8_t*)b_) } };
+    vst1q_u8((uint8_t*)d_, vqtbl2q_u8(t, vandq_u8(vld1q_u8((const uint8_t*)c_), vdupq_n_u8(0x1F))));
+}
+#elif defined(__x86_64__) && defined(__SSE4_1__) && !defined(VMX_SCALAR)
+VMX_INL void vmx_vperm(VMX_D, VMX_A, VMX_B, VMX_C) {
+    const __m128i c = _mm_loadu_si128((const __m128i*)c_), i = _mm_and_si128(c, _mm_set1_epi8(0x0F));
+    const __m128i lo = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)a_), i);
+    const __m128i hi = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i*)b_), i);
+    _mm_storeu_si128((__m128i*)d_, _mm_blendv_epi8(lo, hi, _mm_slli_epi16(c, 3)));   /* bit 4 -> bit 7 */
+}
+#else
+VMX_INL void vmx_vperm(VMX_D, VMX_A, VMX_B, VMX_C) {
+    const uint8_t* a = (const uint8_t*)a_; const uint8_t* b = (const uint8_t*)b_; const uint8_t* c = (const uint8_t*)c_;
+    uint8_t r[16];
+    for (int i = 0; i < 16; i++) { const uint8_t sel = c[i] & 0x1F; r[i] = sel < 16 ? a[sel] : b[sel - 16]; }
+    VMX_OUT;
+}
+#endif
+
+/* HV: vsldoi d = bytes n..n+15 of a||b, n a literal (the lifter's 32-byte stack temporary). */
+#if defined(__aarch64__) && defined(__ARM_NEON) && !defined(VMX_SCALAR)
+#define VMX_VSLDOI(d, a, b, n) vst1q_u8((uint8_t*)(d), vextq_u8(vld1q_u8((const uint8_t*)(a)), vld1q_u8((const uint8_t*)(b)), (n)))
+#elif defined(__x86_64__) && defined(__SSE4_1__) && !defined(VMX_SCALAR)
+#define VMX_VSLDOI(d, a, b, n) _mm_storeu_si128((__m128i*)(d), _mm_alignr_epi8(_mm_loadu_si128((const __m128i*)(b)), _mm_loadu_si128((const __m128i*)(a)), (n)))
+#else
+#define VMX_VSLDOI(d, a, b, n) do { uint8_t t_[32]; memcpy(t_, (a), 16); memcpy(t_ + 16, (b), 16); memcpy((d), t_ + (n), 16); } while (0)
+#endif
 
 #ifdef __cplusplus
 }
